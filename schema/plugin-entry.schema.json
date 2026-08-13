@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/07/schema#",
+  "$id": "https://raw.githubusercontent.com/poggit-alternative-test/plugin-registry/main/schema/plugin-entry.schema.json",
+  "title": "Registry Index Entry",
+  "description": "A single plugin entry in the Axolotl registry index (data/index.json). All plugin.yml-derived fields are re-fetched and overwritten by the sync workflow on every run — never trusted from a submission body.",
+
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "version",
+    "api",
+    "author",
+    "description",
+    "category",
+    "repo_url",
+    "download_url",
+    "approved_at",
+    "last_synced_at"
+  ],
+
+  "additionalProperties": false,
+
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$",
+      "description": "GitHub owner/repo slug, used as the stable unique identifier for this plugin."
+    },
+
+    "name": {
+      "type": "string",
+      "description": "Plugin name, sourced directly from plugin.yml name field on every sync."
+    },
+
+    "version": {
+      "type": "string",
+      "description": "Latest version string from the most recent GitHub Release tag."
+    },
+
+    "api": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Array of supported PocketMine API version strings from plugin.yml api field."
+    },
+
+    "author": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Array of author strings from plugin.yml author/authors field."
+    },
+
+    "description": {
+      "type": "string",
+      "description": "Plugin description from plugin.yml description field."
+    },
+
+    "category": {
+      "type": "string",
+      "enum": ["admin", "economy", "chat", "world", "protection", "gameplay", "fun", "api", "tools", "misc"],
+      "description": "Axolotl-defined category assigned at submission time and approved by a maintainer."
+    },
+
+    "icon_path": {
+      "type": ["string", "null"],
+      "description": "Relative path to the icon file inside the plugin's repo, as submitted. Null means no explicit path was submitted — the sync workflow will attempt the `assets/icon.png` convention path as the first fallback before using the Axolotl default icon."
+    },
+
+    "icon_url": {
+      "type": ["string", "null"],
+      "description": "Resolved raw.githubusercontent.com URL for the icon. Resolution order (Phase 4 sync workflow): (1) submitted icon_path → (2) convention path `assets/icon.png` → (3) Axolotl's own default icon (constant TBD, set in Phase 5). Each step is attempted only if the previous returned 404. The URL uses the literal `HEAD` segment in place of a branch name (e.g. `/owner/repo/HEAD/assets/icon.png`); GitHub resolves this server-side to the current default branch, so no prior API call to look up the default branch is needed."
+    },
+
+    "repo_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Direct GitHub URL to the plugin repository."
+    },
+
+    "download_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL pointing to the .phar asset on the GitHub Releases page. Always originates from the plugin's own repo, never proxied through Axolotl."
+    },
+
+    "download_count": {
+      "type": ["integer", "null"],
+      "description": "Total GitHub Release asset download count, fetched on every sync. Null if the asset or release data is unavailable."
+    },
+
+    "build_tier": {
+      "type": "string",
+      "enum": ["verified", "built-via-ci", "unverified", null],
+      "description": "Badge tier: 'verified' = has SLSA attestation; 'built-via-ci' = asset uploaded by github-actions[bot]; 'unverified' = manually uploaded asset; null = unknown/unavailable."
+    },
+
+    "attestation_checked_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the attestation check last ran. Null if the check has never run or the release is unavailable."
+    },
+
+    "approved_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when a maintainer added the approved label — the moment this entry was first written to the index."
+    },
+
+    "last_synced_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when any field in this entry was last refreshed by the scheduled sync workflow."
+    },
+
+    "unavailable": {
+      "type": "boolean",
+      "description": "True if the plugin's repo went private, its release was removed, or the .phar asset is otherwise inaccessible. Plugin remains in the index as unavailable rather than being silently dropped."
+    }
+  }
+}

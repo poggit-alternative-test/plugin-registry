@@ -1,0 +1,616 @@
+name: Validate Plugin Submission
+
+# Triggered whenever a submission issue is opened or edited.
+# Phase 2: read-only checks only. Does not write to the index.
+on:
+  issues:
+    types: [opened, edited]
+
+# Minimal permission scope: read repo contents (to fetch plugin.yml/icon),
+# write to issues (to post/edit the validation comment).
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    name: Validate submission
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Auth check ────────────────────────────────────────────────────────────
+      # gh attestation requires being authenticated. GITHUB_TOKEN covers this
+      # in a GitHub Actions context, but we verify explicitly rather than
+      # silently proceeding if auth is somehow absent.
+      - name: Verify GitHub CLI auth
+        run: gh auth status
+
+      # ── Parse issue body ─────────────────────────────────────────────────────
+      # repo_url, category, and icon_path are parsed from the issue body
+      # (which may have arrived via the manual Issue Form path or via the
+      # Phase 7 REST API submission). Both formats are handled by the same
+      # dual-pattern regex below.
+      #
+      # plugin.yml-derived fields in the issue body (name, version, author,
+      # etc.) are for human reviewer reference only. They are NEVER trusted
+      # by this workflow — plugin.yml is re-fetched from the repo via the
+      # Contents API as the source of truth.
+      #
+      # NOTE: We pass the body through env: rather than interpolating
+      # ${{ github.event.issue.body }} directly into run:, per §6.4.
+      - name: Parse submission fields from issue body
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          BODY="$ISSUE_BODY"
+
+          # ── repo_url ──────────────────────────────────────────────────────
+          # Accept either:
+          #   **Repository URL:** https://github.com/owner/repo        (API/path)
+          #   repo_url: https://github.com/owner/repo                (Issue Form)
+          REPO_URL=$(echo "$BODY" | grep -iE '^\*\*Repository URL:\*\*[[:space:]]*' \
+                              | sed -E 's/^\*\*Repository URL:\*\*[[:space:]]*//' \
+                              | tr -d '\r' \
+                              | head -1)
+          if [ -z "$REPO_URL" ]; then
+            REPO_URL=$(echo "$BODY" | grep -iE '^repository url:[[:space:]]*' \
+                                | sed -E 's/^repository url:[[:space:]]*//' \
+                                | tr -d '\r' \
+                                | head -1)
+          fi
+
+          if [ -z "$REPO_URL" ]; then
+            echo "error=repo_url is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # SSRF prevention: reject lookalike domains.
+          # Must be exactly https://github.com/owner/repo[/suffix], no query params.
+          if ! echo "$REPO_URL" | grep -qE '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$'; then
+            echo "error=repo_url must be a public GitHub repository URL (https://github.com/owner/repo)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Extract owner and repo from the URL.
+          OWNER=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f1)
+          REPO=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f2)
+
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+
+          # ── category ───────────────────────────────────────────────────────
+          CATEGORY=$(echo "$BODY" | grep -iE '^\*\*Category:\*\*[[:space:]]*' \
+                               | sed -E 's/^\*\*Category:\*\*[[:space:]]*//' \
+                               | tr -d '\r' | head -1)
+          if [ -z "$CATEGORY" ]; then
+            CATEGORY=$(echo "$BODY" | grep -iE '^category:[[:space:]]*' \
+                                | sed -E 's/^category:[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
+
+          if [ -z "$CATEGORY" ]; then
+            echo "error=category is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "category=$CATEGORY" >> "$GITHUB_OUTPUT"
+
+          # ── icon_path ─────────────────────────────────────────────────────
+          # Accept either format; capture the first non-whitespace token after the label.
+          ICON_RAW=$(echo "$BODY" | grep -iE '^\*\*Icon Path:\*\*[[:space:]]*' \
+                               | sed -E 's/^\*\*Icon Path:\*\*[[:space:]]*//' \
+                               | tr -d '\r' | head -1)
+          if [ -z "$ICON_RAW" ]; then
+            ICON_RAW=$(echo "$BODY" | grep -iE '^icon_path:[[:space:]]*' \
+                                | sed -E 's/^icon_path:[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
+
+          # Only treat as submitted if non-empty and not pure whitespace.
+          if [ -n "$(echo "$ICON_RAW" | tr -d '[:space:]')" ]; then
+            echo "icon_path=$ICON_RAW" >> "$GITHUB_OUTPUT"
+          else
+            echo "icon_path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Fetch plugin.yml from the plugin's repo ───────────────────────────
+      # This is the source of truth for all plugin metadata.
+      # Omitting ?ref= uses the repo's default branch automatically.
+      - name: Fetch plugin.yml
+        id: plugin-yml
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          HTTP_CODE=$(curl -sL -o /tmp/plugin.yml -w "%{http_code}" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/contents/plugin.yml")
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "error=plugin.yml not found in the repository root" >> "$GITHUB_OUTPUT"
+            exit 1
+          elif [ "$HTTP_CODE" -ge "400" ]; then
+            echo "error=Failed to fetch plugin.yml (HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Decode the base64-encoded content from the Contents API response.
+          CONTENT=$(cat /tmp/plugin.yml | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('content', '').replace('\n', ''))
+          " 2>&1)
+
+          if [ -z "$CONTENT" ]; then
+            echo "error=plugin.yml response is missing the content field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          PLUGIN_YAML=$(echo "$CONTENT" | base64 -d 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          echo "plugin_yaml<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$PLUGIN_YAML" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          rm /tmp/plugin.yml
+
+      # ── Parse plugin.yml fields ──────────────────────────────────────────
+      # Validates required fields exist; extracts data for the summary comment.
+      - name: Parse plugin.yml fields
+        id: plugin-info
+        env:
+          PLUGIN_YAML: ${{ steps.plugin-yml.outputs.plugin_yaml }}
+        run: |
+          YAML="$PLUGIN_YAML"
+
+          get_field() {
+            echo "$YAML" | sed -nE "/^${1}:[[:space:]]*/{s/^${1}:[[:space:]]*//;p}" \
+                     | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+
+          get_list_field() {
+            echo "$YAML" | awk "/^${1}:[[:space:]]*/{found=1; next} /^[^[:space:]]/{if(found) exit} found{print}" \
+                     | sed 's/^[[:space:]]*/  /' | head -20
+          }
+
+          NAME=$(get_field "name")
+          VERSION=$(get_field "version")
+          API_FIELD=$(get_field "api")
+          AUTHOR=$(get_field "author")
+          AUTHORS=$(get_field "authors")
+          DESCRIPTION=$(get_field "description")
+          DEPEND=$(get_field "depend")
+
+          # author vs authors: prefer author, fall back to authors.
+          if [ -n "$AUTHOR" ]; then
+            AUTHOR_LIST="$AUTHOR"
+          elif [ -n "$AUTHORS" ]; then
+            AUTHOR_LIST="$AUTHORS"
+          else
+            AUTHOR_LIST="(not specified)"
+          fi
+
+          # api field can be a list or a single string.
+          if echo "$API_FIELD" | grep -qE '^[[:space:]]*-'; then
+            API_LIST="$API_FIELD"
+          else
+            API_LIST="$API_FIELD"
+          fi
+
+          # Fail on missing required fields.
+          if [ -z "$NAME" ]; then
+            echo "error=plugin.yml is missing the required 'name' field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "error=plugin.yml is missing the required 'version' field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "plugin_name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "plugin_api=$API_FIELD" >> "$GITHUB_OUTPUT"
+          echo "plugin_author=$AUTHOR_LIST" >> "$GITHUB_OUTPUT"
+          echo "plugin_description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
+          echo "plugin_depend=$DEPEND" >> "$GITHUB_OUTPUT"
+
+      # ── Validate category ──────────────────────────────────────────────────
+      - name: Validate category
+        id: category-check
+        env:
+          CATEGORY: ${{ steps.parse.outputs.category }}
+        run: |
+          VALID_CATEGORIES="admin economy chat world protection gameplay fun api tools misc"
+          if ! echo "$VALID_CATEGORIES" | grep -qE "(^| )${CATEGORY}($| )"; then
+            echo "error=Invalid category '${CATEGORY}'. Must be one of: $VALID_CATEGORIES" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "category_valid=true" >> "$GITHUB_OUTPUT"
+
+      # ── Validate icon_path (if submitted) ─────────────────────────────────
+      # Only check existence if the user explicitly provided an icon_path.
+      # The three-tier icon_url resolution (submitted path → assets/icon.png →
+      # Axolotl default) is Phase 4's job; this step only verifies that an
+      # explicitly submitted path actually exists in the repo.
+      - name: Validate icon_path (if provided)
+        if: ${{ steps.parse.outputs.icon_path != '' }}
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          ICON_PATH: ${{ steps.parse.outputs.icon_path }}
+        run: |
+          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/contents/${ICON_PATH}")
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "error=icon_path '${ICON_PATH}' was not found in the repository" >> "$GITHUB_OUTPUT"
+            exit 1
+          elif [ "$HTTP_CODE" -ge "400" ]; then
+            echo "error=Failed to check icon_path (HTTP $HTTP_CODE) — skipping icon validation" >> "$GITHUB_OUTPUT"
+            # Non-404 errors (403, 500, etc.) are non-fatal warnings.
+            echo "icon_path_valid=warning" >> "$GITHUB_OUTPUT"
+          else
+            echo "icon_path_valid=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Fetch releases/latest and find .phar asset ────────────────────────
+      # We call /releases/latest specifically rather than scanning the full
+      # releases list because the index's download_url uses the
+      # .../releases/latest/download/... pattern. GitHub's /latest endpoint
+      # excludes pre-releases (pmmp-plugin-actions marks nightly builds as
+      # pre-release), so a repo that only has pre-release .phar assets would
+      # pass a scan of all releases but its download_url would 404.
+      - name: Check for .phar on latest stable release
+        id: release-check
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          # Fetch the latest non-pre-release release. Capture HTTP status on its
+          # own line so we can branch on it explicitly — not just JSON body content.
+          RAW=$(curl -sL -w '\n%{http_code}' \
+            "https://api.github.com/repos/${OWNER}/${REPO}/releases/latest")
+          BODY=$(echo "$RAW" | sed '$d')
+          HTTP_CODE=$(echo "$RAW" | tail -n1)
+
+          # Branch on actual HTTP status, not JSON body content.
+          if [ "$HTTP_CODE" = "200" ]; then
+            :  # proceed to asset scan below
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "error=No stable (non-prerelease) release found in this repository. A pre-release or nightly build alone is not sufficient for listing." >> "$GITHUB_OUTPUT"
+            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            exit 0  # non-fatal: handled in comment
+          else
+            # Anything else (403 rate-limit, 5xx, etc.) is a transient GitHub API
+            # issue, not a submission problem — fail the step so the run is marked
+            # as failed, not silently treated as phar_found=false.
+            echo "error=GitHub API returned HTTP $HTTP_CODE when fetching the latest release. This is a transient infrastructure issue, not a problem with your submission. Please re-open this issue in a few minutes to retry validation." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Scan assets in the latest release for a .phar file.
+          RESULT=$(echo "$BODY" | python3 -c "
+          import sys, json
+
+          release = json.load(sys.stdin)
+          for asset in release.get('assets', []):
+              if asset['name'].lower().endswith('.phar'):
+                  print(f\"FOUND\t{release['tag_name']}\t{asset['name']}\t{asset['browser_download_url']}\t{asset['id']}\")
+                  sys.exit(0)
+          print('NOT_FOUND')
+          " 2>&1)
+
+          if echo "$RESULT" | grep -q '^NOT_FOUND'; then
+            echo "error=No .phar asset found on the latest stable release" >> "$GITHUB_OUTPUT"
+            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            exit 0  # non-fatal: handled in comment
+          fi
+
+          RELEASE_TAG=$(echo "$RESULT" | cut -f2)
+          ASSET_NAME=$(echo "$RESULT" | cut -f3)
+          DOWNLOAD_URL=$(echo "$RESULT" | cut -f4)
+          ASSET_ID=$(echo "$RESULT" | cut -f5)
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+          echo "asset_id=$ASSET_ID" >> "$GITHUB_OUTPUT"
+          echo "phar_found=true" >> "$GITHUB_OUTPUT"
+
+      # ── Check SLSA attestation ──────────────────────────────────────────────
+      # Downloads the .phar to /tmp only for the attestation check, then
+      # immediately removes it regardless of outcome. gh attestation verify
+      # requires a local file path, not a URL.
+      - name: Check SLSA attestation
+        if: ${{ steps.release-check.outputs.phar_found == 'true' }}
+        id: attestation-check
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          DOWNLOAD_URL: ${{ steps.release-check.outputs.download_url }}
+        run: |
+          # Download only — never execute the .phar.
+          if ! curl -sL -o /tmp/plugin.phar "$DOWNLOAD_URL"; then
+            echo "error=Failed to download .phar for attestation check" >> "$GITHUB_OUTPUT"
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Attempt attestation verification.
+          # --repo takes owner/repo as a single combined value.
+          if gh attestation verify /tmp/plugin.phar --repo "${OWNER}/${REPO}" --format json > /tmp/attestation.json 2>&1; then
+            echo "build_tier=verified" >> "$GITHUB_OUTPUT"
+          else
+            # Not verified — fall through to uploader check below.
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+          fi
+
+          rm -f /tmp/plugin.phar
+
+      # ── Check uploader (fallback badge tier) ───────────────────────────────
+      # If gh attestation verify returned non-zero, determine the badge tier
+      # from the asset uploader's login. Only runs when we have a phar.
+      - name: Determine badge tier from uploader
+        if: ${{ steps.release-check.outputs.phar_found == 'true' }}
+        id: uploader-check
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          ASSET_ID: ${{ steps.release-check.outputs.asset_id }}
+          ATTESTATION_TIER: ${{ steps.attestation-check.outputs.build_tier }}
+        run: |
+          # If attestation already gave us "verified", skip uploader check.
+          if [ "$ATTESTATION_TIER" = "verified" ]; then
+            echo "build_tier=verified" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fetch the specific asset to get the uploader.login field.
+          UPLOADER=$(curl -sL \
+            "https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${ASSET_ID}" \
+            -H "Accept: application/vnd.github+json" \
+            | python3 -c "import sys, json; print(json.load(sys.stdin).get('uploader', {}).get('login', ''))" 2>/dev/null)
+
+          if [ "$UPLOADER" = "github-actions[bot]" ]; then
+            echo "build_tier=built-via-ci" >> "$GITHUB_OUTPUT"
+          elif [ -n "$UPLOADER" ]; then
+            echo "build_tier=unverified" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Compose validation result ───────────────────────────────────────────
+      # Collect all check outcomes; the comment step assembles them into
+      # a human-readable summary. We derive a single overall status here.
+      #
+      # icon_path is only validated if explicitly submitted (step has if: guard),
+      # so its error output is only present when the step ran. We access it
+      # via env: so GitHub Actions interpolates ${{ }} before bash runs —
+      # not via shell variable assignment, which would pass the literal string.
+      - name: Determine overall result
+        id: result
+        env:
+          PARSE_ERROR: ${{ steps.parse.outputs.error }}
+          PLUGIN_YML_ERROR: ${{ steps.plugin-yml.outputs.error }}
+          PLUGIN_INFO_ERROR: ${{ steps.plugin-info.outputs.error }}
+          CATEGORY_ERROR: ${{ steps.category-check.outputs.error }}
+          PHAR_ERROR: ${{ steps.release-check.outputs.error }}
+          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          ICON_PATH: ${{ steps.parse.outputs.icon_path }}
+          ICON_STEP_ERROR: ${{ steps['icon-path-check'].outputs.error }}
+        run: |
+          # Collect all non-empty error messages.
+          ERRORS=""
+
+          for E in "$PARSE_ERROR" "$PLUGIN_YML_ERROR" "$PLUGIN_INFO_ERROR" \
+                   "$CATEGORY_ERROR" "$PHAR_ERROR"; do
+            if [ -n "$E" ] && [ "$E" != "null" ]; then
+              ERRORS="${ERRORS}• ${E}"$'\n'
+            fi
+          done
+
+          # icon_path is only validated if it was explicitly submitted.
+          # Only check its error if the step actually ran (icon_path was non-empty).
+          if [ -n "$ICON_PATH" ] && [ -n "$ICON_STEP_ERROR" ] && [ "$ICON_STEP_ERROR" != "null" ]; then
+            ERRORS="${ERRORS}• ${ICON_STEP_ERROR}"$'\n'
+          fi
+
+          # Phars are optional at this stage — the guidance message should
+          # be shown regardless, but we only check tiers if a .phar exists.
+          if [ "$PHAR_FOUND" != "true" ]; then
+            STATUS="failure"
+            STATUS_EMOJI="❌"
+            ERRORS="${ERRORS}• No release with a .phar asset was found"$'\n'
+          elif [ -n "$ERRORS" ]; then
+            STATUS="failure"
+            STATUS_EMOJI="❌"
+          else
+            STATUS="success"
+            STATUS_EMOJI="✅"
+          fi
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "status_emoji=$STATUS_EMOJI" >> "$GITHUB_OUTPUT"
+          echo "errors<<EOF" >> "$GITHUB_OUTPUT"
+          echo -n "$ERRORS" | sed '/^$/d' >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      # ── Update issue labels ────────────────────────────────────────────────
+      # Remove 'pending', add validation result label. Non-fatal if this
+      # fails (e.g. label write permission not granted).
+      - name: Update issue labels
+        if: always()
+        env:
+          STATUS: ${{ steps.result.outputs.status }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          # Remove 'pending' label (ignore failure if it doesn't exist).
+          gh api --method DELETE \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/labels/pending" \
+            --silent 2>/dev/null || true
+
+          # Add result label.
+          LABEL="validation-${STATUS}"
+          if gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/labels/${LABEL}" \
+               --method POST --silent 2>/dev/null; then
+            :
+          else
+            echo "warning=Failed to apply label '${LABEL}' (may already exist or lack permissions)" >&2
+          fi
+
+      # ── Post or update validation comment ─────────────────────────────────
+      # Looks for an existing comment from this workflow (identified by the
+      # <!-- axolotl-validation:start --> marker). Updates it if found,
+      # creates a new one if not. This keeps the issue from accumulating
+      # duplicate comments on re-runs.
+      - name: Post validation comment
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          STATUS: ${{ steps.result.outputs.status }}
+          STATUS_EMOJI: ${{ steps.result.outputs.status_emoji }}
+          REPO_URL: ${{ steps.parse.outputs.repo_url }}
+          CATEGORY: ${{ steps.parse.outputs.category }}
+          ICON_PATH: ${{ steps.parse.outputs.icon_path }}
+          PLUGIN_NAME: ${{ steps.plugin-info.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ steps.plugin-info.outputs.plugin_version }}
+          PLUGIN_API: ${{ steps.plugin-info.outputs.plugin_api }}
+          PLUGIN_AUTHOR: ${{ steps.plugin-info.outputs.plugin_author }}
+          PLUGIN_DESCRIPTION: ${{ steps.plugin-info.outputs.plugin_description }}
+          PLUGIN_DEPEND: ${{ steps.plugin-info.outputs.plugin_depend }}
+          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          RELEASE_TAG: ${{ steps.release-check.outputs.release_tag }}
+          ASSET_NAME: ${{ steps.release-check.outputs.asset_name }}
+          DOWNLOAD_URL: ${{ steps.release-check.outputs.download_url }}
+          BUILD_TIER: ${{ steps.uploader-check.outputs.build_tier || steps.attestation-check.outputs.build_tier }}
+          ERRORS: ${{ steps.result.outputs.errors }}
+        run: |
+          set -e
+
+          # Determine badge tier display label.
+          case "$BUILD_TIER" in
+            verified)       BADGE="**Verified build** ✅" ;;
+            built-via-ci)   BADGE="**Built via CI** 🔧" ;;
+            unverified)     BADGE="**Unverified** ⚠️" ;;
+            *)              BADGE="*(badge tier unknown)*" ;;
+          esac
+
+          # Build the validation check rows.
+          PHAR_ROW=""
+          if [ "$PHAR_FOUND" = "true" ]; then
+            PHAR_ROW="| Release + .phar asset | ✅ Found (tag: \`${RELEASE_TAG}\`, asset: \`${ASSET_NAME}\`) |"
+          else
+            PHAR_ROW="| Release + .phar asset | ❌ **Missing** |"
+          fi
+
+          ICON_ROW=""
+          if [ -n "$ICON_PATH" ]; then
+            ICON_ROW="| icon_path exists (\`${ICON_PATH}\`) | ✅ Verified |"
+          else
+            ICON_ROW="| icon_path | ⏩ Not submitted (no explicit path provided) |"
+          fi
+
+          if [ "$PHAR_FOUND" = "true" ]; then
+            ATTEST_ROW="| SLSA attestation / badge tier | ${BADGE} |"
+          else
+            ATTEST_ROW="| SLSA attestation / badge tier | ⏩ Skipped (no .phar asset found) |"
+          fi
+
+          # Assemble comment body.
+          COMMENT_BODY="\
+          <!-- axolotl-validation:start -->
+
+          ## Plugin Submission — Validation Result $STATUS_EMOJI
+
+          **Status:** ${STATUS^}
+
+          ---
+
+          ### Automated Checks
+
+          | Check | Result |
+          |---|---|\
+          $PHAR_ROW\
+          $ICON_ROW\
+          | category in allowed enum | ✅ \`${CATEGORY}\` |\
+          | plugin.yml exists + required fields | ✅ |\
+          $ATTEST_ROW\
+
+          ---
+
+          ### plugin.yml Reference
+          *(auto-fetched from the repository — these fields are verified, not trusted from the issue body)*
+
+          - **Name:** \`${PLUGIN_NAME}\`
+          - **Version:** \`${PLUGIN_VERSION}\`
+          `
+          if [ -n "$PLUGIN_API" ]; then
+            COMMENT_BODY="${COMMENT_BODY}\n- **API:** \`${PLUGIN_API}\`"
+          fi
+          if [ -n "$PLUGIN_AUTHOR" ]; then
+            COMMENT_BODY="${COMMENT_BODY}\n- **Author(s):** ${PLUGIN_AUTHOR}"
+          fi
+          if [ -n "$PLUGIN_DESCRIPTION" ]; then
+            COMMENT_BODY="${COMMENT_BODY}\n- **Description:** ${PLUGIN_DESCRIPTION}"
+          fi
+          if [ -n "$PLUGIN_DEPEND" ]; then
+            COMMENT_BODY="${COMMENT_BODY}\n- **Dependencies:** \`${PLUGIN_DEPEND}\`"
+          fi
+
+          COMMENT_BODY="${COMMENT_BODY}\n
+          ---
+
+          ### Submitted Metadata
+          - **repo_url:** ${REPO_URL}
+          - **category:** \`${CATEGORY}\`
+          - **icon_path:** \`${ICON_PATH:-<none>}\`
+
+          ### Next Steps
+          "
+                    if [ "$STATUS" = "failure" ]; then
+                      if [ "$PHAR_FOUND" != "true" ]; then
+                        COMMENT_BODY="${COMMENT_BODY}\\
+          A release with a **.phar** asset is required before this plugin can be approved.
+          The fastest way to set up automated builds is to use
+          [**axolotl-pm/pmmp-plugin-actions**](https://github.com/axolotl-pm/pmmp-plugin-actions).
+
+          ---
+          "
+                      fi
+                      COMMENT_BODY="${COMMENT_BODY}\\
+          Please address the failed checks above and re-open/edit this issue to
+          trigger a re-validation.
+          "
+                    else
+                      COMMENT_BODY="${COMMENT_BODY}\\
+          All automated checks passed. A maintainer will review this submission shortly.
+          "
+                    fi
+
+                    COMMENT_BODY="${COMMENT_BODY}\\
+          <!-- axolotl-validation:end -->"
+
+                    # Escape the comment body for safe use in heredoc.
+                    COMMENT_ESCAPED=$(echo "$COMMENT_BODY" | python3 -c "
+          import sys, json
+          print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+
+          # Look for an existing comment from this workflow.
+          EXISTING=$(gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("axolotl-validation:start"))) | .id' \
+            2>/dev/null | head -1 || echo "")
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing validation comment (ID: $EXISTING)"
+            gh api --method PATCH \
+              "repos/${OWNER}/${REPO}/issues/comments/${EXISTING}" \
+              --field body="$COMMENT_BODY" > /dev/null
+          else
+            echo "Posting new validation comment"
+            gh api --method POST \
+              "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+              --field body="$COMMENT_BODY" > /dev/null
+          fi

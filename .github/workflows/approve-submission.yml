@@ -1,0 +1,730 @@
+name: Approve Plugin Submission
+
+# Triggered when a maintainer adds the 'approved' label to a submission issue.
+# Re-runs validation, then writes the plugin entry to data/index.json.
+on:
+  issues:
+    types: [labeled]
+
+# Minimal permissions: read the issue and repo contents (validation is read-only).
+# Write permissions are held at job level, not workflow level (least privilege).
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  # ── Phase 1: re-run all read-only validation checks ──────────────────────
+  # Does NOT trust that Phase 2's results are still valid — state may have
+  # changed since validation (e.g. a new release was cut).
+  validate:
+    name: Re-validate submission
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+      error: ${{ steps.result.outputs.error }}
+      # Parsed fields passed through for the write job
+      owner: ${{ steps.parse.outputs.owner }}
+      repo: ${{ steps.parse.outputs.repo }}
+      repo_url: ${{ steps.parse.outputs.repo_url }}
+      category: ${{ steps.parse.outputs.category }}
+      icon_path: ${{ steps.parse.outputs.icon_path }}
+      icon_url: ${{ steps.icon-resolve.outputs.icon_url }}
+      plugin_name: ${{ steps.plugin-info.outputs.plugin_name }}
+      plugin_version: ${{ steps.plugin-info.outputs.plugin_version }}
+      plugin_api: ${{ steps.plugin-info.outputs.plugin_api }}
+      plugin_author: ${{ steps.plugin-info.outputs.plugin_author }}
+      plugin_description: ${{ steps.plugin-info.outputs.plugin_description }}
+      release_tag: ${{ steps.release-check.outputs.release_tag }}
+      download_url: ${{ steps.release-check.outputs.download_url }}
+      download_count: ${{ steps.release-check.outputs.download_count }}
+      build_tier: ${{ steps.attestation.outputs.build_tier }}
+      attestation_checked_at: ${{ steps.attestation.outputs.checked_at }}
+      phar_found: ${{ steps.release-check.outputs.phar_found }}
+
+    steps:
+      # Guard: only proceed when the 'approved' label was added.
+      - name: Guard — approved label only
+        if: github.event.label.name != 'approved'
+        run: exit 0
+
+      - name: Verify GitHub CLI auth
+        run: gh auth status
+
+      # ── Parse issue body ───────────────────────────────────────────────────
+      # Same dual-pattern parsing as validate-submission.yml (Issue Form + API path).
+      # Plugin.yml-derived fields in the body are for reference only — always
+      # re-fetch from the repo.
+      - name: Parse submission fields from issue body
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          BODY="$ISSUE_BODY"
+
+          # ── repo_url ──────────────────────────────────────────────────────
+          REPO_URL=$(echo "$BODY" | grep -iE '^\*\*Repository URL:\*\*[[:space:]]*' \
+                              | sed -E 's/^\*\*Repository URL:\*\*[[:space:]]*//' \
+                              | tr -d '\r' | head -1)
+          if [ -z "$REPO_URL" ]; then
+            REPO_URL=$(echo "$BODY" | grep -iE '^repository url:[[:space:]]*' \
+                                | sed -E 's/^repository url:[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
+
+          if [ -z "$REPO_URL" ]; then
+            echo "error=repo_url is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # SSRF prevention: exact GitHub.com owner/repo pattern only.
+          if ! echo "$REPO_URL" | grep -qE '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$'; then
+            echo "error=repo_url must be a public GitHub repository URL (https://github.com/owner/repo)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          OWNER=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f1)
+          REPO=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f2)
+
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+
+          # ── category ───────────────────────────────────────────────────────
+          CATEGORY=$(echo "$BODY" | grep -iE '^\*\*Category:\*\*[[:space:]]*' \
+                               | sed -E 's/^\*\*Category:\*\*[[:space:]]*//' \
+                               | tr -d '\r' | head -1)
+          if [ -z "$CATEGORY" ]; then
+            CATEGORY=$(echo "$BODY" | grep -iE '^category:[[:space:]]*' \
+                                | sed -E 's/^category:[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
+
+          if [ -z "$CATEGORY" ]; then
+            echo "error=category is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "category=$CATEGORY" >> "$GITHUB_OUTPUT"
+
+          # ── icon_path ─────────────────────────────────────────────────────
+          ICON_RAW=$(echo "$BODY" | grep -iE '^\*\*Icon Path:\*\*[[:space:]]*' \
+                               | sed -E 's/^\*\*Icon Path:\*\*[[:space:]]*//' \
+                               | tr -d '\r' | head -1)
+          if [ -z "$ICON_RAW" ]; then
+            ICON_RAW=$(echo "$BODY" | grep -iE '^icon_path:[[:space:]]*' \
+                                | sed -E 's/^icon_path:[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
+
+          if [ -n "$(echo "$ICON_RAW" | tr -d '[:space:]')" ]; then
+            echo "icon_path=$ICON_RAW" >> "$GITHUB_OUTPUT"
+          else
+            echo "icon_path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Validate category enum ─────────────────────────────────────────────
+      - name: Validate category
+        id: category-check
+        env:
+          CATEGORY: ${{ steps.parse.outputs.category }}
+        run: |
+          VALID_CATEGORIES="admin economy chat world protection gameplay fun api tools misc"
+          if ! echo "$VALID_CATEGORIES" | grep -qE "(^| )${CATEGORY}($| )"; then
+            echo "error=Invalid category '${CATEGORY}'" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # ── Fetch plugin.yml ────────────────────────────────────────────────────
+      - name: Fetch plugin.yml
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          HTTP_CODE=$(curl -sL -o /tmp/plugin.yml -w "%{http_code}" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/contents/plugin.yml")
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "error=plugin.yml not found in the repository root" >> "$GITHUB_OUTPUT"
+            exit 1
+          elif [ "$HTTP_CODE" -ge "400" ]; then
+            echo "error=Failed to fetch plugin.yml (HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          CONTENT=$(cat /tmp/plugin.yml | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('content', '').replace('\n', ''))
+          " 2>&1)
+
+          if [ -z "$CONTENT" ]; then
+            echo "error=plugin.yml response is missing the content field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          PLUGIN_YAML=$(echo "$CONTENT" | base64 -d 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          echo "plugin_yaml<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$PLUGIN_YAML" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          rm /tmp/plugin.yml
+
+      # ── Parse plugin.yml fields ───────────────────────────────────────────
+      - name: Parse plugin.yml fields
+        id: plugin-info
+        env:
+          PLUGIN_YAML: ${{ steps.plugin-yml.outputs.plugin_yaml }}
+        run: |
+          YAML="$PLUGIN_YAML"
+
+          get_field() {
+            echo "$YAML" | sed -nE "/^${1}:[[:space:]]*/{s/^${1}:[[:space:]]*//;p}" \
+                     | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+
+          NAME=$(get_field "name")
+          VERSION=$(get_field "version")
+          API_FIELD=$(get_field "api")
+          AUTHOR=$(get_field "author")
+          AUTHORS=$(get_field "authors")
+          DESCRIPTION=$(get_field "description")
+
+          if [ -n "$AUTHOR" ]; then
+            AUTHOR_LIST="$AUTHOR"
+          elif [ -n "$AUTHORS" ]; then
+            AUTHOR_LIST="$AUTHORS"
+          else
+            AUTHOR_LIST="(not specified)"
+          fi
+
+          if [ -z "$NAME" ]; then
+            echo "error=plugin.yml is missing the required 'name' field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "error=plugin.yml is missing the required 'version' field" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "plugin_name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "plugin_api=$API_FIELD" >> "$GITHUB_OUTPUT"
+          echo "plugin_author=$AUTHOR_LIST" >> "$GITHUB_OUTPUT"
+          echo "plugin_description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
+
+      # ── Fetch releases/latest and find .phar asset ───────────────────────────
+      - name: Check for .phar on latest stable release
+        id: release-check
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          RAW=$(curl -sL -w '\n%{http_code}' \
+            "https://api.github.com/repos/${OWNER}/${REPO}/releases/latest")
+          BODY=$(echo "$RAW" | sed '$d')
+          HTTP_CODE=$(echo "$RAW" | tail -n1)
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "error=No stable release found" >> "$GITHUB_OUTPUT"
+            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$HTTP_CODE" -ge "400" ]; then
+            echo "error=GitHub API returned HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          RESULT=$(echo "$BODY" | python3 -c "
+          import sys, json
+          release = json.load(sys.stdin)
+          for asset in release.get('assets', []):
+              if asset['name'].lower().endswith('.phar'):
+                  print(f\"FOUND\t{release['tag_name']}\t{asset['name']}\t{asset['browser_download_url']}\t{asset['id']}\t{asset['download_count']}\")
+                  sys.exit(0)
+          print('NOT_FOUND')
+          " 2>&1)
+
+          if echo "$RESULT" | grep -q '^NOT_FOUND'; then
+            echo "error=No .phar asset found on the latest stable release" >> "$GITHUB_OUTPUT"
+            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_TAG=$(echo "$RESULT" | cut -f2)
+          ASSET_NAME=$(echo "$RESULT" | cut -f3)
+          DOWNLOAD_URL=$(echo "$RESULT" | cut -f4)
+          ASSET_ID=$(echo "$RESULT" | cut -f5)
+          DOWNLOAD_COUNT=$(echo "$RESULT" | cut -f6)
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+          echo "asset_id=$ASSET_ID" >> "$GITHUB_OUTPUT"
+          echo "download_count=${DOWNLOAD_COUNT:-0}" >> "$GITHUB_OUTPUT"
+          echo "phar_found=true" >> "$GITHUB_OUTPUT"
+
+      # ── Check SLSA attestation ─────────────────────────────────────────────
+      - name: Check SLSA attestation
+        id: attestation
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          DOWNLOAD_URL: ${{ steps.release-check.outputs.download_url }}
+          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+        run: |
+          if [ "$PHAR_FOUND" != "true" ]; then
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+            echo "checked_at=null" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHECKED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          if ! curl -sL -o /tmp/plugin.phar "$DOWNLOAD_URL"; then
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+            echo "checked_at=$CHECKED_AT" >> "$GITHUB_OUTPUT"
+            rm -f /tmp/plugin.phar
+            exit 0
+          fi
+
+          if gh attestation verify /tmp/plugin.phar --repo "${OWNER}/${REPO}" --format json > /tmp/attestation.json 2>&1; then
+            echo "build_tier=verified" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "checked_at=$CHECKED_AT" >> "$GITHUB_OUTPUT"
+          rm -f /tmp/plugin.phar
+
+      # ── Fallback badge tier from uploader ───────────────────────────────────
+      # If attestation returned null, check the asset uploader.
+      - name: Determine badge tier from uploader
+        id: uploader-check
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          ASSET_ID: ${{ steps.release-check.outputs.asset_id }}
+          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          ATTESTATION_TIER: ${{ steps.attestation.outputs.build_tier }}
+        run: |
+          if [ "$PHAR_FOUND" != "true" ] || [ "$ATTESTATION_TIER" = "verified" ]; then
+            exit 0  # attestation already determined or no phar
+          fi
+
+          UPLOADER=$(curl -sL \
+            "https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${ASSET_ID}" \
+            -H "Accept: application/vnd.github+json" \
+            | python3 -c "import sys, json; print(json.load(sys.stdin).get('uploader', {}).get('login', ''))" 2>/dev/null)
+
+          if [ "$UPLOADER" = "github-actions[bot]" ]; then
+            echo "build_tier=built-via-ci" >> "$GITHUB_OUTPUT"
+          elif [ -n "$UPLOADER" ]; then
+            echo "build_tier=unverified" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_tier=null" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Resolve icon_url (three-tier fallback) ─────────────────────────────
+      # Tier 1: submitted icon_path → raw.githubusercontent.com/owner/repo/HEAD/<path>
+      # Tier 2: assets/icon.png convention → raw.githubusercontent.com/owner/repo/HEAD/assets/icon.png
+      # Tier 3: null (frontend uses DEFAULT_PLUGIN_ICON constant)
+      - name: Resolve icon_url
+        id: icon-resolve
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          ICON_PATH: ${{ steps.parse.outputs.icon_path }}
+        run: |
+          ICON_URL=""
+          HEAD_BASE="https://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD"
+
+          # Tier 1: explicitly submitted icon_path
+          if [ -n "$ICON_PATH" ]; then
+            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
+              "${HEAD_BASE}/${ICON_PATH}")
+            if [ "$HTTP_CODE" = "200" ]; then
+              ICON_URL="${HEAD_BASE}/${ICON_PATH}"
+            fi
+          fi
+
+          # Tier 2: convention path assets/icon.png
+          if [ -z "$ICON_URL" ]; then
+            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
+              "${HEAD_BASE}/assets/icon.png")
+            if [ "$HTTP_CODE" = "200" ]; then
+              ICON_URL="${HEAD_BASE}/assets/icon.png"
+            fi
+          fi
+
+          # Tier 3: null — frontend uses DEFAULT_PLUGIN_ICON
+          echo "icon_url=${ICON_URL:-null}" >> "$GITHUB_OUTPUT"
+
+      # ── Determine overall validation result ───────────────────────────────────
+      - name: Determine overall result
+        id: result
+        env:
+          PARSE_ERROR: ${{ steps.parse.outputs.error }}
+          PLUGIN_YML_ERROR: ${{ steps['plugin-yml'].outputs.error }}
+          PLUGIN_INFO_ERROR: ${{ steps['plugin-info'].outputs.error }}
+          CATEGORY_ERROR: ${{ steps['category-check'].outputs.error }}
+          PHAR_ERROR: ${{ steps['release-check'].outputs.error }}
+          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          UPLOADER_TIER: ${{ steps['uploader-check'].outputs.build_tier }}
+          ATTESTATION_TIER: ${{ steps.attestation.outputs.build_tier }}
+        run: |
+          # Final build tier: prefer attestation result, fall back to uploader.
+          if [ "$ATTESTATION_TIER" = "verified" ]; then
+            FINAL_TIER="$ATTESTATION_TIER"
+          elif [ -n "$UPLOADER_TIER" ] && [ "$UPLOADER_TIER" != "null" ]; then
+            FINAL_TIER="$UPLOADER_TIER"
+          else
+            FINAL_TIER="$ATTESTATION_TIER"
+          fi
+          echo "final_tier=$FINAL_TIER" >> "$GITHUB_OUTPUT"
+
+          # Collect errors.
+          ERRORS=""
+          for E in "$PARSE_ERROR" "$PLUGIN_YML_ERROR" "$PLUGIN_INFO_ERROR" \
+                   "$CATEGORY_ERROR" "$PHAR_ERROR"; do
+            if [ -n "$E" ] && [ "$E" != "null" ]; then
+              ERRORS="${ERRORS}• ${E}"$'\n'
+            fi
+          done
+
+          if [ -n "$ERRORS" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "error<<EOF" >> "$GITHUB_OUTPUT"
+            echo -n "$ERRORS" | sed '/^$/d' >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          elif [ "$PHAR_FOUND" != "true" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "error=No .phar asset found on the latest stable release" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Phase 2: write to index.json if validation passed ─────────────────────
+  write-index:
+    name: Write to index
+    needs: validate
+    # Only grant write permission here — not at workflow level.
+    permissions:
+      contents: write
+      issues: write
+    # Skip if validation failed. A maintainer override path could bypass this
+    # guard in the future by checking a different label.
+    if: needs.validate.outputs.status == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout registry repo
+        uses: actions/checkout@v4
+
+      - name: Verify GitHub CLI auth
+        run: gh auth status
+
+      # ── Parse plugin.yml again in this job ──────────────────────────────
+      # (No `needs` dependency on a job output since we're in a new runner.
+      # Re-running the fetch is cheap and avoids needing to pass large files
+      # through job outputs.)
+      - name: Re-fetch plugin.yml
+        env:
+          OWNER: ${{ needs.validate.outputs.owner }}
+          REPO: ${{ needs.validate.outputs.repo }}
+        run: |
+          HTTP_CODE=$(curl -sL -o /tmp/plugin.yml -w "%{http_code}" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/contents/plugin.yml")
+          if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" -ge "400" ]; then
+            echo "error=plugin.yml not found (HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          CONTENT=$(cat /tmp/plugin.yml | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('content', '').replace('\n', ''))
+          " 2>&1)
+
+          PLUGIN_YAML=$(echo "$CONTENT" | base64 -d 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          echo "plugin_yaml<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$PLUGIN_YAML" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          rm /tmp/plugin.yml
+
+      # ── Parse author from plugin.yml ─────────────────────────────────────
+      - name: Parse plugin.yml author field
+        id: author
+        env:
+          PLUGIN_YAML: ${{ steps.reparse-plugin.outputs.plugin_yaml }}
+        run: |
+          YAML="$PLUGIN_YAML"
+          AUTHOR=$(echo "$YAML" | sed -nE "/^author:[[:space:]]*/{s/^author:[[:space:]]*//;p}" \
+                           | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          AUTHORS=$(echo "$YAML" | sed -nE "/^authors:[[:space:]]*/{s/^authors:[[:space:]]*//;p}" \
+                           | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          if [ -n "$AUTHOR" ]; then
+            echo "author_list=$AUTHOR" >> "$GITHUB_OUTPUT"
+          elif [ -n "$AUTHORS" ]; then
+            echo "author_list=$AUTHORS" >> "$GITHUB_OUTPUT"
+          else
+            echo "author_list=(not specified)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Build and write index entry ──────────────────────────────────────
+      - name: Update data/index.json
+        env:
+          OWNER: ${{ needs.validate.outputs.owner }}
+          REPO: ${{ needs.validate.outputs.repo }}
+          REPO_URL: ${{ needs.validate.outputs.repo_url }}
+          CATEGORY: ${{ needs.validate.outputs.category }}
+          ICON_PATH: ${{ needs.validate.outputs.icon_path }}
+          ICON_URL: ${{ needs.validate.outputs.icon_url }}
+          PLUGIN_NAME: ${{ needs.validate.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
+          PLUGIN_API: ${{ needs.validate.outputs.plugin_api }}
+          PLUGIN_DESCRIPTION: ${{ needs.validate.outputs.plugin_description }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          DOWNLOAD_URL: ${{ needs.validate.outputs.download_url }}
+          DOWNLOAD_COUNT: ${{ needs.validate.outputs.download_count }}
+          BUILD_TIER: ${{ needs.validate.outputs.build_tier }}
+          ATTESTATION_CHECKED_AT: ${{ needs.validate.outputs.attestation_checked_at }}
+          AUTHOR_LIST: ${{ steps.author.outputs.author_list }}
+        run: |
+          set -e
+
+          # Normalise icon_url: "null" string from GHA output → JSON null
+          if [ "$ICON_URL" = "null" ] || [ -z "$ICON_URL" ]; then
+            ICON_URL_JSON="null"
+          else
+            ICON_URL_JSON="\"$ICON_URL\""
+          fi
+
+          # Build the new/updated entry as a JSON object.
+          # approved_at is set to now — the moment of approval.
+          APPROVED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LAST_SYNCED=$APPROVED_AT
+
+          ENTRY=$(python3 -c "
+          import json, sys
+
+          api_field = '''${PLUGIN_API}'''.strip()
+          # plugin.yml api field can be a YAML list (multi-line) or single string
+          if api_field.startswith('-'):
+              # Multi-line YAML list — extract each item
+              import re
+              items = re.findall(r'^\s*-\s*(.+)', api_field, re.MULTILINE)
+              api_list = [item.strip() for item in items if item.strip()]
+          else:
+              api_list = [s.strip() for s in api_field.split(',') if s.strip()]
+
+          author_raw = '''${AUTHOR_LIST}'''.strip()
+          if author_raw.startswith('-') or ',' in author_raw:
+              import re
+              if ',' in author_raw:
+                  author_list = [a.strip() for a in author_raw.split(',') if a.strip()]
+              else:
+                  items = re.findall(r'^\s*-\s*(.+)', author_raw, re.MULTILINE)
+                  author_list = [item.strip() for item in items if item.strip()]
+          else:
+              author_list = [author_raw] if author_raw and author_raw != '(not specified)' else []
+
+          build_tier = '''${BUILD_TIER}'''.strip() or None
+          if build_tier == 'null': build_tier = None
+
+          checked_at = '''${ATTESTATION_CHECKED_AT}'''.strip()
+          if checked_at == 'null' or not checked_at: checked_at = None
+
+          download_count = '''${DOWNLOAD_COUNT}'''.strip()
+          download_count = int(download_count) if download_count.isdigit() else None
+
+          entry = {
+            'id': '''${OWNER}/${REPO}''',
+            'name': '''${PLUGIN_NAME}''',
+            'version': '''${RELEASE_TAG}'''.lstrip('v'),
+            'api': api_list,
+            'author': author_list,
+            'description': '''${PLUGIN_DESCRIPTION}'''.strip(),
+            'category': '''${CATEGORY}''',
+            'icon_path': '''${ICON_PATH}'''.strip() or None,
+            'icon_url': None if '''${ICON_URL}'''.strip() in ('null', '') else '''${ICON_URL}''',
+            'repo_url': '''${REPO_URL}''',
+            'download_url': '''${DOWNLOAD_URL}''',
+            'download_count': download_count,
+            'build_tier': build_tier,
+            'attestation_checked_at': checked_at,
+            'approved_at': '''${APPROVED_AT}''',
+            'last_synced_at': '''${LAST_SYNCED}''',
+          }
+          print(json.dumps(entry, indent=2))
+          " 2>&1)
+
+          echo "Generated entry:"
+          echo "$ENTRY"
+
+          # Read current index (may be empty or missing).
+          if [ -f data/index.json ] && [ -s data/index.json ]; then
+            INDEX=$(cat data/index.json)
+          else
+            INDEX="[]"
+          fi
+
+          # Update or append the entry by id.
+          UPDATED=$(python3 -c "
+          import json, sys
+
+          index = json.loads('''${INDEX}''')
+          new_entry = json.loads('''${ENTRY}''')
+
+          # Replace existing entry with same id, or append.
+          ids = [i for i, e in enumerate(index) if e.get('id') == new_entry['id']]
+          if ids:
+              index[ids[0]] = new_entry
+              action = 'updated'
+          else:
+              index.append(new_entry)
+              action = 'added'
+
+          print(json.dumps(index, indent=2))
+          print(f'ACTION={action}')
+          " 2>&1)
+
+          # Split output: last line is ACTION=, rest is JSON
+          ACTION=$(echo "$UPDATED" | tail -n1)
+          JSON_BODY=$(echo "$UPDATED" | sed '$d')
+
+          echo "$ACTION" | grep -q 'ACTION=added' && echo "action=added" >> "$GITHUB_OUTPUT"
+          echo "$ACTION" | grep -q 'ACTION=updated' && echo "action=updated" >> "$GITHUB_OUTPUT"
+
+          echo "$JSON_BODY" > data/index.json
+          echo "Index written ($(echo "$JSON_BODY" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))') entries)"
+
+      # ── Commit the change ─────────────────────────────────────────────────
+      - name: Commit and push
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PLUGIN_NAME: ${{ needs.validate.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
+          ACTION: ${{ steps.write.outputs.action }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/index.json
+          git diff --staged --quiet && {
+            echo "No changes to commit — entry already exists with identical data."
+            exit 0
+          }
+
+          git commit -m "Add plugin: ${PLUGIN_NAME} v${PLUGIN_VERSION}"
+
+          # Push using GITHUB_TOKEN — actions bot can push to the repo
+          # because the workflow has contents:write permission.
+          git push
+
+          echo "Committed ${ACTION} for ${PLUGIN_NAME} v${PLUGIN_VERSION}"
+
+      # ── Post approval comment on the issue ─────────────────────────────────
+      - name: Post approval comment
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PLUGIN_NAME: ${{ needs.validate.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
+          ACTION: ${{ steps.write.outputs.action }}
+        run: |
+          BODY="\
+          <!-- axolotl-approval:start -->
+
+          ## ✅ Plugin Approved
+
+          **${PLUGIN_NAME}** v${PLUGIN_VERSION} has been $ACTION to the registry index.
+
+          It will appear on the site shortly. You do not need to resubmit for
+          future version updates — the sync workflow refreshes all plugins
+          automatically every 6 hours.
+
+          <!-- axolotl-approval:end -->
+          "
+
+          gh api --method POST \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            --field body="$BODY" > /dev/null
+
+      # ── Remove approved label to prevent duplicate triggers ──────────────────
+      # The workflow re-triggers when any label changes, including our own removal.
+      # Using a label check on re-run is sufficient to prevent infinite loops.
+      - name: Remove approved label
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          gh api --method DELETE \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/labels/approved" \
+            --silent 2>/dev/null || true
+
+  # ── Phase 3: post failure comment if validation failed ─────────────────────
+  post-failure:
+    name: Post failure comment
+    needs: validate
+    # Only run if validation failed.
+    if: needs.validate.outputs.status == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Verify GitHub CLI auth
+        run: gh auth status
+
+      - name: Post failure comment
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          ERROR: ${{ needs.validate.outputs.error }}
+          PHAR_FOUND: ${{ needs.validate.outputs.phar_found }}
+        run: |
+          # Escape error text for markdown.
+          ERROR_ESCAPED=$(echo "$ERROR" | python3 -c "
+          import sys, json
+          print(json.dumps(sys.stdin.read().strip()))
+          " 2>/dev/null || echo '\"Validation failed\"')
+
+          BODY="\
+          <!-- axolotl-approval:start -->
+
+          ## ❌ Approval Blocked
+
+          This submission could not be approved because validation failed:
+
+          $ERROR
+
+          Please address the issues above and re-open/edit this issue to
+          trigger a fresh validation run.
+
+          ---
+          *This comment was posted automatically by the approval workflow.*
+          <!-- axolotl-approval:end -->
+          "
+
+          gh api --method POST \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            --field body="$BODY" > /dev/null
+
+          echo "Posted failure comment on issue #${ISSUE_NUMBER}"
+
+      - name: Remove approved label
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          gh api --method DELETE \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/labels/approved" \
+            --silent 2>/dev/null || true

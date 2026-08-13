@@ -1,0 +1,130 @@
+name: Submit a Plugin
+description: >
+  Submit a PocketMine-MP plugin to the Axolotl registry.
+  For developers who don't have CI set up via axolotl-pm/pmmp-plugin-actions,
+  this form provides a manual fallback. If you have CI, use the submission
+  form on the registry site instead — it opens this same issue automatically.
+title: "[Plugin] "
+labels:
+  - pending
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Plugin Submission
+
+        > **Note:** If your repository has GitHub Actions CI (e.g. via
+        > [axolotl-pm/pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions))
+        > that produces a Release with a `.phar` asset, submit via the
+        > registry site instead. This form is a manual fallback for
+        > developers without CI.
+
+        Fields marked 🔒 are re-verified from your `plugin.yml` by the
+        automated validation workflow and **cannot** be set manually.
+
+  - type: input
+    id: repo_url
+    attributes:
+      label: Repository URL
+      description: >
+        The full GitHub URL to your plugin repository, e.g.
+        `https://github.com/username/plugin-name`.
+        Must be a **public** repository.
+      placeholder: https://github.com/username/plugin-name
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: >
+        The category that best describes your plugin.
+      options:
+        - admin
+        - economy
+        - chat
+        - world
+        - protection
+        - gameplay
+        - fun
+        - api
+        - tools
+        - misc
+    validations:
+      required: true
+
+  - type: input
+    id: icon_path
+    attributes:
+      label: Icon Path
+      description: >
+        Relative path to the icon file inside your repository,
+        e.g. `assets/icon.png`. Leave blank to use no icon.
+        Will be validated via the Contents API.
+      placeholder: assets/icon.png
+    validations:
+      required: false
+
+  - type: input
+    id: plugin_name
+    attributes:
+      label: Plugin Name 🔒
+      description: >
+        Must match the `name` field in your `plugin.yml`. This is
+        re-verified automatically — don't change it.
+      placeholder: MyPlugin
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Version 🔒
+      description: >
+        Must match the `version` field in your `plugin.yml`. This is
+        re-verified automatically.
+      placeholder: "1.0.0"
+
+  - type: input
+    id: plugin_api
+    attributes:
+      label: API Version(s) 🔒
+      description: >
+        Must match the `api` field in your `plugin.yml`.
+      placeholder: "5.0.0"
+
+  - type: input
+    id: plugin_author
+    attributes:
+      label: Author(s) 🔒
+      description: >
+        Copied from `author` / `authors` in your `plugin.yml`.
+      placeholder: username
+
+  - type: textarea
+    id: plugin_description
+    attributes:
+      label: Description 🔒
+      description: >
+        Copied from `description` in your `plugin.yml`.
+      placeholder: A short description of what this plugin does.
+
+  - type: textarea
+    id: plugin_depend
+    attributes:
+      label: Dependencies (virions) 🔒
+      description: >
+        Copied from `depend` in your `plugin.yml`, if present.
+        One per line.
+      placeholder: VirionLibrary
+
+  - type: textarea
+    id: additional_notes
+    attributes:
+      label: Additional notes for the reviewer
+      description: >
+        Anything a maintainer should know when reviewing this plugin —
+        special setup steps, known incompatibilities, screenshots, etc.
+        Optional.
+      placeholder: |
+        This plugin requires a database configuration...
+        Known to conflict with...
