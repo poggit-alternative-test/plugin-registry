@@ -59,9 +59,19 @@ jobs:
           BODY="$ISSUE_BODY"
 
           # ── repo_url ──────────────────────────────────────────────────────
-          REPO_URL=$(echo "$BODY" | grep -iE '^\*\*Repository URL:\*\*[[:space:]]*' \
-                              | sed -E 's/^\*\*Repository URL:\*\*[[:space:]]*//' \
+          # Three formats, tried in order:
+          #   1. ### Repository URL  +  value on next line    (Issue Form)
+          #   2. **Repository URL:** value                    (API / manual)
+          #   3. repository url: value                        (plain)
+          REPO_URL=$(echo "$BODY" | grep -iE '^###[[:space:]]+repository[[:space:]]+url[[:space:]]*$' -A1 \
+                              | tail -n1 \
+                              | sed -E 's/^[[:space:]]+//' \
                               | tr -d '\r' | head -1)
+          if [ -z "$REPO_URL" ]; then
+            REPO_URL=$(echo "$BODY" | grep -iE '^\*\*Repository URL:\*\*[[:space:]]*' \
+                                | sed -E 's/^\*\*Repository URL:\*\*[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
           if [ -z "$REPO_URL" ]; then
             REPO_URL=$(echo "$BODY" | grep -iE '^repository url:[[:space:]]*' \
                                 | sed -E 's/^repository url:[[:space:]]*//' \
@@ -87,9 +97,15 @@ jobs:
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
 
           # ── category ───────────────────────────────────────────────────────
-          CATEGORY=$(echo "$BODY" | grep -iE '^\*\*Category:\*\*[[:space:]]*' \
-                               | sed -E 's/^\*\*Category:\*\*[[:space:]]*//' \
+          CATEGORY=$(echo "$BODY" | grep -iE '^###[[:space:]]+category[[:space:]]*$' -A1 \
+                               | tail -n1 \
+                               | sed -E 's/^[[:space:]]+//' \
                                | tr -d '\r' | head -1)
+          if [ -z "$CATEGORY" ]; then
+            CATEGORY=$(echo "$BODY" | grep -iE '^\*\*Category:\*\*[[:space:]]*' \
+                                | sed -E 's/^\*\*Category:\*\*[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
           if [ -z "$CATEGORY" ]; then
             CATEGORY=$(echo "$BODY" | grep -iE '^category:[[:space:]]*' \
                                 | sed -E 's/^category:[[:space:]]*//' \
@@ -104,9 +120,15 @@ jobs:
           echo "category=$CATEGORY" >> "$GITHUB_OUTPUT"
 
           # ── icon_path ─────────────────────────────────────────────────────
-          ICON_RAW=$(echo "$BODY" | grep -iE '^\*\*Icon Path:\*\*[[:space:]]*' \
-                               | sed -E 's/^\*\*Icon Path:\*\*[[:space:]]*//' \
+          ICON_RAW=$(echo "$BODY" | grep -iE '^###[[:space:]]+icon[[:space:]]+path[[:space:]]*$' -A1 \
+                               | tail -n1 \
+                               | sed -E 's/^[[:space:]]+//' \
                                | tr -d '\r' | head -1)
+          if [ -z "$ICON_RAW" ]; then
+            ICON_RAW=$(echo "$BODY" | grep -iE '^\*\*Icon Path:\*\*[[:space:]]*' \
+                                | sed -E 's/^\*\*Icon Path:\*\*[[:space:]]*//' \
+                                | tr -d '\r' | head -1)
+          fi
           if [ -z "$ICON_RAW" ]; then
             ICON_RAW=$(echo "$BODY" | grep -iE '^icon_path:[[:space:]]*' \
                                 | sed -E 's/^icon_path:[[:space:]]*//' \
