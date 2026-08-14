@@ -47,9 +47,6 @@ jobs:
         if: github.event.label.name != 'approved'
         run: exit 0
 
-      - name: Verify GitHub CLI auth
-        run: gh auth status
-
       # ── Parse issue body ───────────────────────────────────────────────────
       # Same dual-pattern parsing as validate-submission.yml (Issue Form + API path).
       # Plugin.yml-derived fields in the body are for reference only — always
@@ -418,9 +415,7 @@ jobs:
       - name: Checkout registry repo
         uses: actions/checkout@v4
 
-      - name: Verify GitHub CLI auth
-        run: gh auth status
-
+      # ── Parse plugin.yml again in this job ──────────────────────────────
       # ── Parse plugin.yml again in this job ──────────────────────────────
       # (No `needs` dependency on a job output since we're in a new runner.
       # Re-running the fetch is cheap and avoids needing to pass large files
@@ -680,8 +675,6 @@ jobs:
 
     steps:
       - name: Verify GitHub CLI auth
-        run: gh auth status
-
       - name: Post failure comment
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}

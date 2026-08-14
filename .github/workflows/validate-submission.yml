@@ -20,10 +20,7 @@ jobs:
     steps:
       # ── Auth check ────────────────────────────────────────────────────────────
       # gh attestation requires being authenticated. GITHUB_TOKEN covers this
-      # in a GitHub Actions context, but we verify explicitly rather than
-      # silently proceeding if auth is somehow absent.
-      - name: Verify GitHub CLI auth
-        run: gh auth status
+      # in a GitHub Actions context.
 
       # ── Parse issue body ─────────────────────────────────────────────────────
       # repo_url, category, and icon_path are parsed from the issue body

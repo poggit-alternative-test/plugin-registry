@@ -14,7 +14,7 @@ on:
       force:
         description: 'Force full sync even if nothing has changed'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
   # Every 6 hours. Pick an off-minute mark to spread load across the fleet.
@@ -38,9 +38,6 @@ jobs:
     steps:
       - name: Checkout registry repo
         uses: actions/checkout@v4
-
-      - name: Verify GitHub CLI auth
-        run: gh auth status
 
       # ── Load index.json ──────────────────────────────────────────────────
       - name: Load index
@@ -298,9 +295,6 @@ jobs:
     steps:
       - name: Checkout registry repo
         uses: actions/checkout@v4
-
-      - name: Verify GitHub CLI auth
-        run: gh auth status
 
       # data/index.json was already updated by the refresh job and is
       # present in the repo after checkout (the write happened on the same
