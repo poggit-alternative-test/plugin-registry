@@ -61,55 +61,53 @@ jobs:
 
           body = os.environ.get('ISSUE_BODY', '')
 
-          def extract_value(after_pattern):
-              """Find the first non-empty, non-placeholder line after a header pattern."""
-              m = re.search(after_pattern, body, re.IGNORECASE)
+          def get_after(header_pattern):
+              """Get value after a header, handling the \n\n format used by GitHub Issue Forms."""
+              m = re.search(header_pattern, body, re.IGNORECASE)
               if not m:
                   return ''
-              segment = body[m.end():]
-              for line in segment.split('\n'):
-                  stripped = line.strip()
-                  if stripped and stripped.lower() not in ('_no response_', 'no response'):
-                      return stripped
-              return ''
+              pos = m.end()
+              # Skip any blank lines
+              while pos < len(body) and body[pos] in '\n\r ':
+                  pos += 1
+              # Collect until end of line
+              end = pos
+              while end < len(body) and body[end] not in '\n\r':
+                  end += 1
+              value = body[pos:end].strip()
+              # Skip GitHub's placeholder for unanswered optional fields
+              if value.startswith('_') or not value:
+                  return ''
+              return value
 
           # ── repo_url ──────────────────────────────────────────────────────
-          repo_url = extract_value(r'\n###\s+Repository\s+URL\s*\n')
+          repo_url = get_after(r'\n###\s+Repository\s+URL\s*\n\n')
           if not repo_url:
-              repo_url = extract_value(r'\*\*Repository\s+URL:\*\*\s*\n')
-          if not repo_url:
-              repo_url = extract_value(r'\nrepository\s+url:\s*')
+              repo_url = get_after(r'\n\*\*\s*Repository\s+URL\s*:\*\*\s*\n\n')
 
           if not repo_url:
-              print("error=repo_url is required but was not found in the issue body")
+              print("error=repo_url is required")
               exit(1)
 
-          # SSRF prevention: exact github.com owner/repo pattern.
           if not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
-              print("error=repo_url must be a public GitHub repository URL (https://github.com/owner/repo)")
+              print("error=repo_url must be https://github.com/owner/repo")
               exit(1)
 
           parts = repo_url.replace('https://github.com/', '').split('/')
-          owner, repo = parts[0], parts[1]
+          owner = parts[0]
+          repo = parts[1].split('?')[0].strip('/')
 
           # ── category ───────────────────────────────────────────────────────
-          category = extract_value(r'\n###\s+Category\s*\n')
-          if not category:
-              category = extract_value(r'\*\*Category:\*\*\s*\n')
-          if not category:
-              category = extract_value(r'\ncategory:\s*')
+          category = get_after(r'\n###\s+Category\s*\n\n')
 
           if not category:
-              print("error=category is required but was not found in the issue body")
+              print("error=category is required")
               exit(1)
 
           # ── icon_path ─────────────────────────────────────────────────────
-          icon_path = extract_value(r'\n###\s+Icon\s+Path\s*\n')
-          if not icon_path:
-              icon_path = extract_value(r'\*\*Icon\s+Path:\*\*\s*\n')
-          if not icon_path:
-              icon_path = extract_value(r'\nicon_path:\s*')
+          icon_path = get_after(r'\n###\s+Icon\s+Path\s*\n\n')
 
+          # Write outputs
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"repo_url={repo_url}\n")
               f.write(f"owner={owner}\n")
@@ -117,6 +115,8 @@ jobs:
               f.write(f"category={category}\n")
               if icon_path:
                   f.write(f"icon_path={icon_path}\n")
+
+          print(f"Parsed: repo={owner}/{repo} category={category}")
           PYEOF
 
       # ── Validate category enum ─────────────────────────────────────────────
