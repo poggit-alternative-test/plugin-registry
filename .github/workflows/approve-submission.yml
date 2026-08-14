@@ -674,7 +674,6 @@ jobs:
       issues: write
 
     steps:
-      - name: Verify GitHub CLI auth
       - name: Post failure comment
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
