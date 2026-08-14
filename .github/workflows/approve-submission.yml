@@ -48,98 +48,76 @@ jobs:
         run: exit 0
 
       # ── Parse issue body ───────────────────────────────────────────────────
-      # Same dual-pattern parsing as validate-submission.yml (Issue Form + API path).
-      # Plugin.yml-derived fields in the body are for reference only — always
+      # Parses both Issue Form (### headers) and API/markdown formats.
+      # plugin.yml-derived fields in the body are for reference only — always
       # re-fetch from the repo.
       - name: Parse submission fields from issue body
         id: parse
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          BODY="$ISSUE_BODY"
+          python3 << 'PYEOF'
+          import os, re
+
+          body = os.environ.get('ISSUE_BODY', '')
+
+          def extract_value(after_pattern):
+              """Find the first non-empty, non-placeholder line after a header pattern."""
+              m = re.search(after_pattern, body, re.IGNORECASE)
+              if not m:
+                  return ''
+              segment = body[m.end():]
+              for line in segment.split('\n'):
+                  stripped = line.strip()
+                  if stripped and stripped.lower() not in ('_no response_', 'no response'):
+                      return stripped
+              return ''
 
           # ── repo_url ──────────────────────────────────────────────────────
-          # Three formats, tried in order:
-          #   1. ### Repository URL  +  value on next line    (Issue Form)
-          #   2. **Repository URL:** value                    (API / manual)
-          #   3. repository url: value                        (plain)
-          REPO_URL=$(echo "$BODY" | grep -iE '^###[[:space:]]+repository[[:space:]]+url[[:space:]]*$' -A1 \
-                              | tail -n1 \
-                              | sed -E 's/^[[:space:]]+//' \
-                              | tr -d '\r' | head -1)
-          if [ -z "$REPO_URL" ]; then
-            REPO_URL=$(echo "$BODY" | grep -iE '^\*\*Repository URL:\*\*[[:space:]]*' \
-                                | sed -E 's/^\*\*Repository URL:\*\*[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
-          if [ -z "$REPO_URL" ]; then
-            REPO_URL=$(echo "$BODY" | grep -iE '^repository url:[[:space:]]*' \
-                                | sed -E 's/^repository url:[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
+          repo_url = extract_value(r'\n###\s+Repository\s+URL\s*\n')
+          if not repo_url:
+              repo_url = extract_value(r'\*\*Repository\s+URL:\*\*\s*\n')
+          if not repo_url:
+              repo_url = extract_value(r'\nrepository\s+url:\s*')
 
-          if [ -z "$REPO_URL" ]; then
-            echo "error=repo_url is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
+          if not repo_url:
+              print("error=repo_url is required but was not found in the issue body")
+              exit(1)
 
-          # SSRF prevention: exact GitHub.com owner/repo pattern only.
-          if ! echo "$REPO_URL" | grep -qE '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$'; then
-            echo "error=repo_url must be a public GitHub repository URL (https://github.com/owner/repo)" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
+          # SSRF prevention: exact github.com owner/repo pattern.
+          if not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
+              print("error=repo_url must be a public GitHub repository URL (https://github.com/owner/repo)")
+              exit(1)
 
-          OWNER=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f1)
-          REPO=$(echo "$REPO_URL" | sed -E 's|^https://github\.com/||' | cut -d/ -f2)
-
-          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
-          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
-          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          parts = repo_url.replace('https://github.com/', '').split('/')
+          owner, repo = parts[0], parts[1]
 
           # ── category ───────────────────────────────────────────────────────
-          CATEGORY=$(echo "$BODY" | grep -iE '^###[[:space:]]+category[[:space:]]*$' -A1 \
-                               | tail -n1 \
-                               | sed -E 's/^[[:space:]]+//' \
-                               | tr -d '\r' | head -1)
-          if [ -z "$CATEGORY" ]; then
-            CATEGORY=$(echo "$BODY" | grep -iE '^\*\*Category:\*\*[[:space:]]*' \
-                                | sed -E 's/^\*\*Category:\*\*[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
-          if [ -z "$CATEGORY" ]; then
-            CATEGORY=$(echo "$BODY" | grep -iE '^category:[[:space:]]*' \
-                                | sed -E 's/^category:[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
+          category = extract_value(r'\n###\s+Category\s*\n')
+          if not category:
+              category = extract_value(r'\*\*Category:\*\*\s*\n')
+          if not category:
+              category = extract_value(r'\ncategory:\s*')
 
-          if [ -z "$CATEGORY" ]; then
-            echo "error=category is required but was not found in the issue body" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          echo "category=$CATEGORY" >> "$GITHUB_OUTPUT"
+          if not category:
+              print("error=category is required but was not found in the issue body")
+              exit(1)
 
           # ── icon_path ─────────────────────────────────────────────────────
-          ICON_RAW=$(echo "$BODY" | grep -iE '^###[[:space:]]+icon[[:space:]]+path[[:space:]]*$' -A1 \
-                               | tail -n1 \
-                               | sed -E 's/^[[:space:]]+//' \
-                               | tr -d '\r' | head -1)
-          if [ -z "$ICON_RAW" ]; then
-            ICON_RAW=$(echo "$BODY" | grep -iE '^\*\*Icon Path:\*\*[[:space:]]*' \
-                                | sed -E 's/^\*\*Icon Path:\*\*[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
-          if [ -z "$ICON_RAW" ]; then
-            ICON_RAW=$(echo "$BODY" | grep -iE '^icon_path:[[:space:]]*' \
-                                | sed -E 's/^icon_path:[[:space:]]*//' \
-                                | tr -d '\r' | head -1)
-          fi
+          icon_path = extract_value(r'\n###\s+Icon\s+Path\s*\n')
+          if not icon_path:
+              icon_path = extract_value(r'\*\*Icon\s+Path:\*\*\s*\n')
+          if not icon_path:
+              icon_path = extract_value(r'\nicon_path:\s*')
 
-          if [ -n "$(echo "$ICON_RAW" | tr -d '[:space:]')" ]; then
-            echo "icon_path=$ICON_RAW" >> "$GITHUB_OUTPUT"
-          else
-            echo "icon_path=" >> "$GITHUB_OUTPUT"
-          fi
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"repo_url={repo_url}\n")
+              f.write(f"owner={owner}\n")
+              f.write(f"repo={repo}\n")
+              f.write(f"category={category}\n")
+              if icon_path:
+                  f.write(f"icon_path={icon_path}\n")
+          PYEOF
 
       # ── Validate category enum ─────────────────────────────────────────────
       - name: Validate category
