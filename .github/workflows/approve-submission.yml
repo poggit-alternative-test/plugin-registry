@@ -319,10 +319,11 @@ jobs:
             echo "build_tier=null" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Resolve icon_url (three-tier fallback) ─────────────────────────────
+      # ── Resolve icon_url (four-tier fallback) ────────────────────────────────
       # Tier 1: submitted icon_path → raw.githubusercontent.com/owner/repo/HEAD/<path>
-      # Tier 2: assets/icon.png convention → raw.githubusercontent.com/owner/repo/HEAD/assets/icon.png
-      # Tier 3: null (frontend uses DEFAULT_PLUGIN_ICON constant)
+      # Tier 2: icon.png convention → checked first
+      # Tier 3: assets/icon.png convention → checked second
+      # Tier 4: null (frontend uses DEFAULT_PLUGIN_ICON constant)
       - name: Resolve icon_url
         id: icon-resolve
         env:
@@ -342,7 +343,16 @@ jobs:
             fi
           fi
 
-          # Tier 2: convention path assets/icon.png
+          # Tier 2: icon.png (first fallback)
+          if [ -z "$ICON_URL" ]; then
+            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
+              "${HEAD_BASE}/icon.png")
+            if [ "$HTTP_CODE" = "200" ]; then
+              ICON_URL="${HEAD_BASE}/icon.png"
+            fi
+          fi
+
+          # Tier 3: assets/icon.png (second fallback)
           if [ -z "$ICON_URL" ]; then
             HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" \
               "${HEAD_BASE}/assets/icon.png")
@@ -351,7 +361,7 @@ jobs:
             fi
           fi
 
-          # Tier 3: null — frontend uses DEFAULT_PLUGIN_ICON
+          # Tier 4: null — frontend uses DEFAULT_PLUGIN_ICON
           echo "icon_url=${ICON_URL:-null}" >> "$GITHUB_OUTPUT"
 
       # ── Determine overall validation result ───────────────────────────────────

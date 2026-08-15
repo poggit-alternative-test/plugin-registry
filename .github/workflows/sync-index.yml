@@ -4,9 +4,9 @@ name: Sync Plugin Index
 #
 # - Refreshes: version, download_url, download_count, build_tier,
 #   attestation_checked_at, last_synced_at
-# - Re-resolves icon_url per three-tier fallback (may change if the submitter
-#   uploaded assets/ after approval)
-# - Marks entries unavailable if their repo or latest release becomes inaccessible
+# - Re-resolves icon_url per four-tier fallback (may change if the submitter
+#   uploaded assets/ after approval): submitted icon_path → icon.png →
+#   assets/icon.png → null (frontend uses default)
 # - Commits only when something actually changed
 on:
   workflow_dispatch:
@@ -98,8 +98,9 @@ jobs:
               """
               Three-tier icon resolution:
               1. explicitly submitted icon_path (may have been updated since approval)
-              2. assets/icon.png convention
-              3. null (frontend uses default)
+              2. icon.png (common convention — checked first)
+              3. assets/icon.png convention (checked second)
+              4. null (frontend uses default)
 
               Uses /HEAD/ — GitHub resolves this server-side; no API call needed
               to determine the default branch.
@@ -110,7 +111,11 @@ jobs:
               if current_icon_path and raw_head_exists(f'{head_base}/{current_icon_path}'):
                   return current_icon_path, f'{head_base}/{current_icon_path}'
 
-              # Tier 2: assets/icon.png
+              # Tier 2a: icon.png (first fallback)
+              if raw_head_exists(f'{head_base}/icon.png'):
+                  return 'icon.png', f'{head_base}/icon.png'
+
+              # Tier 2b: assets/icon.png (second fallback)
               if raw_head_exists(f'{head_base}/assets/icon.png'):
                   return 'assets/icon.png', f'{head_base}/assets/icon.png'
 
