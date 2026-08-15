@@ -485,113 +485,108 @@ jobs:
           ATTESTATION_CHECKED_AT: ${{ needs.validate.outputs.attestation_checked_at }}
           AUTHOR_LIST: ${{ steps.author.outputs.author_list }}
         run: |
-          set -e
+          python3 << 'PYEOF'
+          import json, os, re
+          from datetime import datetime, timezone
 
-          # Normalise icon_url: "null" string from GHA output → JSON null
-          if [ "$ICON_URL" = "null" ] || [ -z "$ICON_URL" ]; then
-            ICON_URL_JSON="null"
-          else
-            ICON_URL_JSON="\"$ICON_URL\""
-          fi
+          def env(key):
+              return os.environ.get(key, '')
 
-          # Build the new/updated entry as a JSON object.
-          # approved_at is set to now — the moment of approval.
-          APPROVED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          LAST_SYNCED=$APPROVED_AT
+          def strip_wrapping_quotes(s):
+              """Strip a single layer of matching quote chars some plugin.yml
+              scalars carry literally (e.g. `description: "..."`)."""
+              s = s.strip()
+              if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+                  s = s[1:-1]
+              return s.strip()
 
-          ENTRY=$(python3 -c "
-          import json, sys
+          owner = env('OWNER')
+          repo = env('REPO')
 
-          api_field = '''${PLUGIN_API}'''.strip()
-          # plugin.yml api field can be a YAML list (multi-line) or single string
+          # api field can be a multi-line YAML list ("- 5.36.0") or a single
+          # scalar value.
+          api_field = env('PLUGIN_API').strip()
           if api_field.startswith('-'):
-              # Multi-line YAML list — extract each item
-              import re
               items = re.findall(r'^\s*-\s*(.+)', api_field, re.MULTILINE)
-              api_list = [item.strip() for item in items if item.strip()]
+              api_list = [strip_wrapping_quotes(i) for i in items if i.strip()]
           else:
-              api_list = [s.strip() for s in api_field.split(',') if s.strip()]
+              api_list = [strip_wrapping_quotes(s) for s in api_field.split(',') if s.strip()]
 
-          author_raw = '''${AUTHOR_LIST}'''.strip()
-          if author_raw.startswith('-') or ',' in author_raw:
-              import re
-              if ',' in author_raw:
-                  author_list = [a.strip() for a in author_raw.split(',') if a.strip()]
-              else:
-                  items = re.findall(r'^\s*-\s*(.+)', author_raw, re.MULTILINE)
-                  author_list = [item.strip() for item in items if item.strip()]
+          author_raw = env('AUTHOR_LIST').strip()
+          if ',' in author_raw:
+              author_list = [strip_wrapping_quotes(a) for a in author_raw.split(',') if a.strip()]
+          elif author_raw.startswith('-'):
+              items = re.findall(r'^\s*-\s*(.+)', author_raw, re.MULTILINE)
+              author_list = [strip_wrapping_quotes(i) for i in items if i.strip()]
+          elif author_raw and author_raw != '(not specified)':
+              author_list = [strip_wrapping_quotes(author_raw)]
           else:
-              author_list = [author_raw] if author_raw and author_raw != '(not specified)' else []
+              author_list = []
 
-          build_tier = '''${BUILD_TIER}'''.strip() or None
-          if build_tier == 'null': build_tier = None
+          build_tier = env('BUILD_TIER').strip() or None
+          if build_tier == 'null':
+              build_tier = None
 
-          checked_at = '''${ATTESTATION_CHECKED_AT}'''.strip()
-          if checked_at == 'null' or not checked_at: checked_at = None
+          checked_at = env('ATTESTATION_CHECKED_AT').strip()
+          if checked_at in ('null', ''):
+              checked_at = None
 
-          download_count = '''${DOWNLOAD_COUNT}'''.strip()
-          download_count = int(download_count) if download_count.isdigit() else None
+          download_count_raw = env('DOWNLOAD_COUNT').strip()
+          download_count = int(download_count_raw) if download_count_raw.isdigit() else None
+
+          icon_path = env('ICON_PATH').strip() or None
+          icon_url = env('ICON_URL').strip()
+          icon_url = None if icon_url in ('null', '') else icon_url
+
+          now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
           entry = {
-            'id': '''${OWNER}/${REPO}''',
-            'name': '''${PLUGIN_NAME}''',
-            'version': '''${RELEASE_TAG}'''.lstrip('v'),
-            'api': api_list,
-            'author': author_list,
-            'description': '''${PLUGIN_DESCRIPTION}'''.strip(),
-            'category': '''${CATEGORY}''',
-            'icon_path': '''${ICON_PATH}'''.strip() or None,
-            'icon_url': None if '''${ICON_URL}'''.strip() in ('null', '') else '''${ICON_URL}''',
-            'repo_url': '''${REPO_URL}''',
-            'download_url': '''${DOWNLOAD_URL}''',
-            'download_count': download_count,
-            'build_tier': build_tier,
-            'attestation_checked_at': checked_at,
-            'approved_at': '''${APPROVED_AT}''',
-            'last_synced_at': '''${LAST_SYNCED}''',
+              'id': f'{owner}/{repo}',
+              'name': env('PLUGIN_NAME'),
+              'version': env('RELEASE_TAG').lstrip('v'),
+              'api': api_list,
+              'author': author_list,
+              'description': strip_wrapping_quotes(env('PLUGIN_DESCRIPTION')),
+              'category': env('CATEGORY'),
+              'icon_path': icon_path,
+              'icon_url': icon_url,
+              'repo_url': env('REPO_URL'),
+              'download_url': env('DOWNLOAD_URL'),
+              'download_count': download_count,
+              'build_tier': build_tier,
+              'attestation_checked_at': checked_at,
+              'approved_at': now,
+              'last_synced_at': now,
           }
+
+          print("Generated entry:")
           print(json.dumps(entry, indent=2))
-          " 2>&1)
 
-          echo "Generated entry:"
-          echo "$ENTRY"
+          index_path = 'data/index.json'
+          if os.path.exists(index_path) and os.path.getsize(index_path) > 0:
+              with open(index_path) as f:
+                  index = json.load(f)
+          else:
+              index = []
 
-          # Read current index (may be empty or missing).
-          if [ -f data/index.json ] && [ -s data/index.json ]; then
-            INDEX=$(cat data/index.json)
-          else
-            INDEX="[]"
-          fi
-
-          # Update or append the entry by id.
-          UPDATED=$(python3 -c "
-          import json, sys
-
-          index = json.loads('''${INDEX}''')
-          new_entry = json.loads('''${ENTRY}''')
-
-          # Replace existing entry with same id, or append.
-          ids = [i for i, e in enumerate(index) if e.get('id') == new_entry['id']]
+          # Replace existing entry with the same id, or append.
+          ids = [i for i, e in enumerate(index) if e.get('id') == entry['id']]
           if ids:
-              index[ids[0]] = new_entry
+              index[ids[0]] = entry
               action = 'updated'
           else:
-              index.append(new_entry)
+              index.append(entry)
               action = 'added'
 
-          print(json.dumps(index, indent=2))
-          print(f'ACTION={action}')
-          " 2>&1)
+          with open(index_path, 'w') as f:
+              json.dump(index, f, indent=2)
+              f.write('\n')
 
-          # Split output: last line is ACTION=, rest is JSON
-          ACTION=$(echo "$UPDATED" | tail -n1)
-          JSON_BODY=$(echo "$UPDATED" | sed '$d')
+          print(f"Index written ({len(index)} entries)")
 
-          echo "$ACTION" | grep -q 'ACTION=added' && echo "action=added" >> "$GITHUB_OUTPUT"
-          echo "$ACTION" | grep -q 'ACTION=updated' && echo "action=updated" >> "$GITHUB_OUTPUT"
-
-          echo "$JSON_BODY" > data/index.json
-          echo "Index written ($(echo "$JSON_BODY" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))') entries)"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"action={action}\n")
+          PYEOF
 
       # ── Commit the change ─────────────────────────────────────────────────
       - name: Commit and push
