@@ -430,6 +430,7 @@ jobs:
       - name: Update issue labels
         if: always()
         env:
+          GH_TOKEN: ${{ github.token }}
           STATUS: ${{ steps.result.outputs.status }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
@@ -456,6 +457,7 @@ jobs:
       # duplicate comments on re-runs.
       - name: Post validation comment
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
