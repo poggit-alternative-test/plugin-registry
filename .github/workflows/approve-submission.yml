@@ -36,14 +36,19 @@ jobs:
       plugin_api: ${{ steps.plugin-info.outputs.plugin_api }}
       plugin_author: ${{ steps.plugin-info.outputs.plugin_author }}
       plugin_description: ${{ steps.plugin-info.outputs.plugin_description }}
-      release_tag: ${{ steps.release-check.outputs.release_tag }}
-      download_url: ${{ steps.release-check.outputs.download_url }}
-      download_count: ${{ steps.release-check.outputs.download_count }}
-      build_tier: ${{ steps.attestation.outputs.build_tier }}
+      # Stable release
+      stable_found: ${{ steps.stable-release.outputs.stable_found }}
+      release_tag: ${{ steps.stable-release.outputs.stable_tag }}
+      download_url: ${{ steps.stable-release.outputs.stable_download_url }}
+      download_count: ${{ steps.stable-release.outputs.stable_download_count }}
+      stable_asset_id: ${{ steps.stable-release.outputs.stable_asset_id }}
+      # Nightly build
+      nightly_found: ${{ steps.nightly-release.outputs.nightly_found }}
+      nightly_tag: ${{ steps.nightly-release.outputs.nightly_tag }}
+      nightly_download_url: ${{ steps.nightly-release.outputs.nightly_download_url }}
+      # Build tier (only from stable)
+      build_tier: ${{ steps.result.outputs.final_tier }}
       attestation_checked_at: ${{ steps.attestation.outputs.checked_at }}
-      phar_found: ${{ steps.release-check.outputs.phar_found }}
-      is_nightly: ${{ steps.release-check.outputs.is_nightly }}
-      dev_build_tag: ${{ steps.release-check.outputs.dev_build_tag }}
 
     steps:
       # ── Parse issue body ───────────────────────────────────────────────────
@@ -209,9 +214,9 @@ jobs:
           echo "plugin_author=$AUTHOR_LIST" >> "$GITHUB_OUTPUT"
           echo "plugin_description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
 
-      # ── Fetch releases/latest and find .phar asset ───────────────────────────
-      - name: Check for .phar on latest stable release
-        id: release-check
+      # ── Check stable release ────────────────────────────────────────────────
+      - name: Check stable release
+        id: stable-release
         env:
           OWNER: ${{ steps.parse.outputs.owner }}
           REPO: ${{ steps.parse.outputs.repo }}
@@ -223,7 +228,7 @@ jobs:
 
           if [ "$HTTP_CODE" = "404" ]; then
             echo "error=No stable release found" >> "$GITHUB_OUTPUT"
-            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            echo "stable_found=false" >> "$GITHUB_OUTPUT"
             exit 0
           elif [ "$HTTP_CODE" -ge "400" ]; then
             echo "error=GitHub API returned HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
@@ -235,52 +240,74 @@ jobs:
           release = json.load(sys.stdin)
           for asset in release.get('assets', []):
               if asset['name'].lower().endswith('.phar'):
-                  print(f\"FOUND\t{release['tag_name']}\t{asset['name']}\t{asset['browser_download_url']}\t{asset['id']}\t{asset['download_count']}\")
+                  print(f'FOUND\t{release[\"tag_name\"]}\t{asset[\"name\"]}\t{asset[\"browser_download_url\"]}\t{asset[\"id\"]}\t{asset[\"download_count\"]}')
                   sys.exit(0)
           print('NOT_FOUND')
           " 2>&1)
 
           if echo "$RESULT" | grep -q '^NOT_FOUND'; then
             echo "error=No .phar asset found on the latest stable release" >> "$GITHUB_OUTPUT"
-            echo "phar_found=false" >> "$GITHUB_OUTPUT"
+            echo "stable_found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          RELEASE_TAG=$(echo "$RESULT" | cut -f2)
-          ASSET_NAME=$(echo "$RESULT" | cut -f3)
-          DOWNLOAD_URL=$(echo "$RESULT" | cut -f4)
-          ASSET_ID=$(echo "$RESULT" | cut -f5)
-          DOWNLOAD_COUNT=$(echo "$RESULT" | cut -f6)
+          echo "stable_found=true" >> "$GITHUB_OUTPUT"
+          echo "stable_tag=$(echo "$RESULT" | cut -f2)" >> "$GITHUB_OUTPUT"
+          echo "stable_asset_name=$(echo "$RESULT" | cut -f3)" >> "$GITHUB_OUTPUT"
+          echo "stable_download_url=$(echo "$RESULT" | cut -f4)" >> "$GITHUB_OUTPUT"
+          echo "stable_asset_id=$(echo "$RESULT" | cut -f5)" >> "$GITHUB_OUTPUT"
+          echo "stable_download_count=$(echo "$RESULT" | cut -f6)" >> "$GITHUB_OUTPUT"
 
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
-          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
-          echo "asset_id=$ASSET_ID" >> "$GITHUB_OUTPUT"
-          echo "download_count=${DOWNLOAD_COUNT:-0}" >> "$GITHUB_OUTPUT"
-          echo "phar_found=true" >> "$GITHUB_OUTPUT"
+      # ── Check nightly build ─────────────────────────────────────────────────
+      - name: Check nightly build
+        id: nightly-release
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          RAW=$(curl -sL -w '\n%{http_code}' \
+            "https://api.github.com/repos/${OWNER}/${REPO}/releases")
+          BODY=$(echo "$RAW" | sed '$d')
+          HTTP_CODE=$(echo "$RAW" | tail -n1)
 
-          # Detect nightly build — nightly releases are approved as-is.
-          # The sync workflow only syncs stable releases (is_nightly is used
-          # by approval to populate dev_build in the index entry).
-          if echo "$RELEASE_TAG" | grep -qi "nightly"; then
-            echo "is_nightly=true" >> "$GITHUB_OUTPUT"
-            echo "dev_build_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "nightly_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RESULT=$(echo "$BODY" | python3 -c "
+          import sys, json
+          releases = json.load(sys.stdin)
+          for r in releases:
+              if r.get('prerelease') and r.get('tag_name') == 'nightly':
+                  for a in r.get('assets', []):
+                      if a['name'].lower().endswith('.phar'):
+                          print(f'FOUND\t{r[\"tag_name\"]}\t{a[\"browser_download_url\"]}')
+                          sys.exit(0)
+          print('NOT_FOUND')
+          " 2>&1)
+
+          if echo "$RESULT" | grep -q '^FOUND'; then
+            echo "nightly_found=true" >> "$GITHUB_OUTPUT"
+            echo "nightly_tag=$(echo "$RESULT" | cut -f2)" >> "$GITHUB_OUTPUT"
+            echo "nightly_download_url=$(echo "$RESULT" | cut -f3)" >> "$GITHUB_OUTPUT"
           else
-            echo "is_nightly=false" >> "$GITHUB_OUTPUT"
-            echo "dev_build_tag=" >> "$GITHUB_OUTPUT"
+            echo "nightly_found=false" >> "$GITHUB_OUTPUT"
           fi
 
       # ── Check SLSA attestation ─────────────────────────────────────────────
+      # Attestation is only run for stable releases. Nightly builds are
+      # approved without attestation.
       - name: Check SLSA attestation
         id: attestation
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ steps.parse.outputs.owner }}
           REPO: ${{ steps.parse.outputs.repo }}
-          DOWNLOAD_URL: ${{ steps.release-check.outputs.download_url }}
-          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          DOWNLOAD_URL: ${{ steps.stable-release.outputs.stable_download_url }}
+          STABLE_FOUND: ${{ steps.stable-release.outputs.stable_found }}
         run: |
-          if [ "$PHAR_FOUND" != "true" ]; then
+          if [ "$STABLE_FOUND" != "true" ]; then
             echo "build_tier=null" >> "$GITHUB_OUTPUT"
             echo "checked_at=null" >> "$GITHUB_OUTPUT"
             exit 0
@@ -311,12 +338,12 @@ jobs:
         env:
           OWNER: ${{ steps.parse.outputs.owner }}
           REPO: ${{ steps.parse.outputs.repo }}
-          ASSET_ID: ${{ steps.release-check.outputs.asset_id }}
-          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          ASSET_ID: ${{ steps.stable-release.outputs.stable_asset_id }}
+          STABLE_FOUND: ${{ steps.stable-release.outputs.stable_found }}
           ATTESTATION_TIER: ${{ steps.attestation.outputs.build_tier }}
         run: |
-          if [ "$PHAR_FOUND" != "true" ] || [ "$ATTESTATION_TIER" = "verified" ]; then
-            exit 0  # attestation already determined or no phar
+          if [ "$STABLE_FOUND" != "true" ] || [ "$ATTESTATION_TIER" = "verified" ]; then
+            exit 0  # attestation already determined or no stable phar
           fi
 
           UPLOADER=$(curl -sL \
@@ -385,8 +412,9 @@ jobs:
           PLUGIN_YML_ERROR: ${{ steps['plugin-yml'].outputs.error }}
           PLUGIN_INFO_ERROR: ${{ steps['plugin-info'].outputs.error }}
           CATEGORY_ERROR: ${{ steps['category-check'].outputs.error }}
-          PHAR_ERROR: ${{ steps['release-check'].outputs.error }}
-          PHAR_FOUND: ${{ steps.release-check.outputs.phar_found }}
+          STABLE_ERROR: ${{ steps['stable-release'].outputs.error }}
+          STABLE_FOUND: ${{ steps['stable-release'].outputs.stable_found }}
+          NIGHTLY_FOUND: ${{ steps['nightly-release'].outputs.nightly_found }}
           UPLOADER_TIER: ${{ steps['uploader-check'].outputs.build_tier }}
           ATTESTATION_TIER: ${{ steps.attestation.outputs.build_tier }}
         run: |
@@ -403,7 +431,7 @@ jobs:
           # Collect errors.
           ERRORS=""
           for E in "$PARSE_ERROR" "$PLUGIN_YML_ERROR" "$PLUGIN_INFO_ERROR" \
-                   "$CATEGORY_ERROR" "$PHAR_ERROR"; do
+                   "$CATEGORY_ERROR" "$STABLE_ERROR"; do
             if [ -n "$E" ] && [ "$E" != "null" ]; then
               ERRORS="${ERRORS}• ${E}"$'\n'
             fi
@@ -414,9 +442,9 @@ jobs:
             echo "error<<EOF" >> "$GITHUB_OUTPUT"
             echo -n "$ERRORS" | sed '/^$/d' >> "$GITHUB_OUTPUT"
             echo "EOF" >> "$GITHUB_OUTPUT"
-          elif [ "$PHAR_FOUND" != "true" ]; then
+          elif [ "$STABLE_FOUND" != "true" ] && [ "$NIGHTLY_FOUND" != "true" ]; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
-            echo "error=No .phar asset found on the latest stable release" >> "$GITHUB_OUTPUT"
+            echo "error=No valid release (stable or nightly) with a .phar asset was found" >> "$GITHUB_OUTPUT"
           else
             echo "status=success" >> "$GITHUB_OUTPUT"
           fi
@@ -501,13 +529,18 @@ jobs:
           PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
           PLUGIN_API: ${{ needs.validate.outputs.plugin_api }}
           PLUGIN_DESCRIPTION: ${{ needs.validate.outputs.plugin_description }}
+          # Stable release
+          STABLE_FOUND: ${{ needs.validate.outputs.stable_found }}
           RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
           DOWNLOAD_URL: ${{ needs.validate.outputs.download_url }}
           DOWNLOAD_COUNT: ${{ needs.validate.outputs.download_count }}
+          # Nightly build
+          NIGHTLY_FOUND: ${{ needs.validate.outputs.nightly_found }}
+          NIGHTLY_TAG: ${{ needs.validate.outputs.nightly_tag }}
+          NIGHTLY_DL_URL: ${{ needs.validate.outputs.nightly_download_url }}
+          # Build tier (only from stable)
           BUILD_TIER: ${{ needs.validate.outputs.build_tier }}
           ATTESTATION_CHECKED_AT: ${{ needs.validate.outputs.attestation_checked_at }}
-          IS_NIGHTLY: ${{ needs.validate.outputs.is_nightly }}
-          DEV_BUILD_TAG: ${{ needs.validate.outputs.dev_build_tag }}
           AUTHOR_LIST: ${{ steps.author.outputs.author_list }}
         run: |
           python3 << 'PYEOF'
@@ -563,13 +596,18 @@ jobs:
           icon_url = env('ICON_URL').strip()
           icon_url = None if icon_url in ('null', '') else icon_url
 
+          # Stable release info
+          stable_found = env('STABLE_FOUND').strip().lower() == 'true'
           release_tag = env('RELEASE_TAG').strip()
           download_url = env('DOWNLOAD_URL').strip()
-          is_nightly = env('IS_NIGHTLY').strip().lower() == 'true'
-          dev_build_tag = env('DEV_BUILD_TAG').strip()
 
-          # version is the tag stripped of leading 'v'
-          version = release_tag.lstrip('v')
+          # Nightly build info
+          nightly_found = env('NIGHTLY_FOUND').strip().lower() == 'true'
+          nightly_tag = env('NIGHTLY_TAG').strip()
+          nightly_dl_url = env('NIGHTLY_DL_URL').strip()
+
+          # version is tag stripped of leading 'v'
+          version = release_tag.lstrip('v') if release_tag else ''
 
           now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -585,30 +623,43 @@ jobs:
           ids = [i for i, e in enumerate(index) if e.get('id') == f'{owner}/{repo}']
 
           if ids:
-              # Update existing entry
               entry = index[ids[0]]
-              entry['tag'] = release_tag
-              entry['version'] = version
-              entry['download_url'] = download_url
-              entry['build_tier'] = build_tier
-              entry['attestation_checked_at'] = checked_at
-              entry['last_synced_at'] = now
 
-              # Append new tag to all_tags if not already present (newest first)
-              if release_tag not in entry.get('all_tags', []):
-                  entry.setdefault('all_tags', []).insert(0, release_tag)
+              # Update tag/version/download_url only if we have a stable release
+              if stable_found:
+                  entry['tag'] = release_tag
+                  entry['version'] = version
+                  entry['download_url'] = download_url
+                  entry['build_tier'] = build_tier
+                  entry['attestation_checked_at'] = checked_at
 
-              # Set/update dev_build only for nightly releases (only approval sets this)
-              if is_nightly and dev_build_tag:
+                  # Append stable tag to all_tags (newest first) if not present
+                  if release_tag not in entry.get('all_tags', []):
+                      entry.setdefault('all_tags', []).insert(0, release_tag)
+
+              # Update dev_build for nightly
+              if nightly_found and nightly_tag:
                   entry['dev_build'] = {
-                      'tag': dev_build_tag,
-                      'download_url': download_url,
+                      'tag': nightly_tag,
+                      'download_url': nightly_dl_url,
                   }
+              elif nightly_found and not nightly_tag:
+                  # Nightly found but no tag captured — skip dev_build
+                  pass
+              # If no nightly: do NOT clear dev_build (preserve existing)
 
+              entry['last_synced_at'] = now
               action = 'updated'
               print(f"Updated existing entry: {entry['id']}")
           else:
-              # New entry
+              # New entry — requires at least a stable release or nightly to be meaningful
+              dev_build = None
+              if nightly_found and nightly_tag:
+                  dev_build = {
+                      'tag': nightly_tag,
+                      'download_url': nightly_dl_url,
+                  }
+
               entry = {
                   'id': f'{owner}/{repo}',
                   'name': env('PLUGIN_NAME'),
@@ -627,15 +678,9 @@ jobs:
                   'attestation_checked_at': checked_at,
                   'approved_at': now,
                   'last_synced_at': now,
-                  'all_tags': [release_tag],
-                  'dev_build': None,
+                  'all_tags': [release_tag] if stable_found and release_tag else [],
+                  'dev_build': dev_build,
               }
-              # For new nightly submissions, populate dev_build immediately
-              if is_nightly and dev_build_tag:
-                  entry['dev_build'] = {
-                      'tag': dev_build_tag,
-                      'download_url': download_url,
-                  }
 
               index.append(entry)
               action = 'added'
@@ -769,7 +814,6 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           ERROR: ${{ needs.validate.outputs.error }}
-          PHAR_FOUND: ${{ needs.validate.outputs.phar_found }}
         run: |
           # Escape error text for markdown.
           ERROR_ESCAPED=$(echo "$ERROR" | python3 -c "

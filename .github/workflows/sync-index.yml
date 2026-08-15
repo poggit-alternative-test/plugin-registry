@@ -65,6 +65,8 @@ jobs:
       - name: Refresh all plugin entries
         env:
           FORCE: ${{ github.event.inputs.force || 'false' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 << 'PYEOF'
           import json, os, subprocess, time, urllib.request, urllib.error
@@ -127,8 +129,9 @@ jobs:
           def refresh_entry(entry):
               """Refresh a single entry. Returns updated (entry, did_change, reason).
 
-              NOTE: all_tags and dev_build are NEVER modified by the sync workflow.
-              They are only set or updated by the approval workflow.
+              NOTE: all_tags is NEVER modified by the sync workflow. It is only
+              set or updated by the approval workflow. dev_build is also
+              managed by the approval workflow only.
               """
               plugin_id = entry.get('id', '')
               if '/' not in plugin_id:
@@ -136,7 +139,7 @@ jobs:
 
               owner, repo = plugin_id.split('/', 1)
 
-              # ── Fetch /releases/latest ─────────────────────────────────
+              # ── Fetch /releases/latest (stable release) ────────────────────
               status, release = gh_api_json(f'/repos/{owner}/{repo}/releases/latest')
 
               if status == 404:
@@ -149,14 +152,13 @@ jobs:
                   entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                   return entry, True, f'api_error_{status}'
 
-              # ── Find .phar asset ───────────────────────────────────────
+              # ── Find .phar asset in stable release ───────────────────────
               phar_asset = next(
                   (a for a in release.get('assets', []) if a['name'].lower().endswith('.phar')),
                   None
               )
 
               if not phar_asset:
-                  # Release exists but no .phar — mark unavailable.
                   entry['unavailable'] = True
                   entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                   return entry, True, 'release_has_no_phar'
@@ -167,11 +169,10 @@ jobs:
               new_download_count = phar_asset.get('download_count', 0)
               phar_url = phar_asset['browser_download_url']
 
-              # ── Determine build_tier ──────────────────────────────────
+              # ── Determine build_tier (stable only) ─────────────────────
               build_tier = None
               checked_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-              # Try SLSA attestation verification.
               tmp_phar = '/tmp/sync_attestation.phar'
               try:
                   urllib.request.urlretrieve(phar_url, tmp_phar)
@@ -188,7 +189,6 @@ jobs:
                   if os.path.exists(tmp_phar):
                       os.unlink(tmp_phar)
 
-              # Fallback: check uploader.
               if build_tier is None:
                   _, releases = gh_api_json(f'/repos/{owner}/{repo}/releases')
                   if releases:
@@ -245,6 +245,7 @@ jobs:
           print(f'Loaded {len(index)} entries, starting refresh...')
 
           refreshed = []
+          changed_flags = []
           with ThreadPoolExecutor(max_workers=8) as executor:
               futures = {executor.submit(refresh_entry, e): e for e in index}
               for i, future in enumerate(as_completed(futures)):
@@ -252,6 +253,7 @@ jobs:
                   try:
                       entry, changed, reason = future.result()
                       refreshed.append(entry)
+                      changed_flags.append(changed)
                       print(f'  [{i+1}/{len(index)}] {plugin_id}: {reason}')
                   except Exception as exc:
                       print(f'  [{i+1}/{len(index)}] {plugin_id}: ERROR — {exc}', file=__import__('sys').stderr)
@@ -259,12 +261,9 @@ jobs:
                       entry['unavailable'] = True
                       entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                       refreshed.append(entry)
+                      changed_flags.append(True)  # treat unexpected errors as a change worth persisting
 
-          any_changed = FORCE or any(
-              e.get('version') != index[i].get('version')
-              or e.get('unavailable') != index[i].get('unavailable', False)
-              for i, e in enumerate(refreshed)
-          )
+          any_changed = FORCE or any(changed_flags)
 
           unavailable = [e['id'] for e in refreshed if e.get('unavailable')]
           print(f'Sync complete — {len(refreshed)} entries, changed={any_changed}, unavailable={len(unavailable)}')
@@ -286,22 +285,27 @@ jobs:
         id: check-changed
         run: |
           python3 -c "
-          import json, sys
+          import json, os
+
           with open('/tmp/sync_result.json') as f:
               result = json.load(f)
           changed = result['changed']
           entries = result['entries']
           unavailable = result['unavailable']
-          print(f'changed={str(changed).lower()}')
-          print(f'entry_count={len(entries)}')
-          print(f'unavailable={json.dumps(unavailable)}')
-          # Write the index to disk for the write job to use
+
+          # Persist the refreshed index for the commit job.
           with open('data/index.json', 'w') as f:
               json.dump(entries, f, indent=2)
+              f.write('\n')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'changed={str(changed).lower()}\n')
+              f.write(f'entry_count={len(entries)}\n')
+              f.write(f'unavailable={json.dumps(unavailable)}\n')
+
+          print(f'changed={str(changed).lower()} entry_count={len(entries)} unavailable={len(unavailable)}')
           print('data/index.json updated')
           "
-          echo "changed=$(python3 -c 'import json; print(json.load(open(\"/tmp/sync_result.json\"))[\"changed\"])')" >> "$GITHUB_OUTPUT"
-          echo "entry_count=$(python3 -c 'import json; print(len(json.load(open(\"/tmp/sync_result.json\"))[\"entries\"]))')" >> "$GITHUB_OUTPUT"
 
   # ── Phase 2: commit if anything changed ────────────────────────────────────
   commit:
