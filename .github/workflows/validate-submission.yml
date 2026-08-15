@@ -535,7 +535,7 @@ jobs:
 
           - **Name:** \`${PLUGIN_NAME}\`
           - **Version:** \`${PLUGIN_VERSION}\`
-          `
+          "
           if [ -n "$PLUGIN_API" ]; then
             COMMENT_BODY="${COMMENT_BODY}\n- **API:** \`${PLUGIN_API}\`"
           fi
