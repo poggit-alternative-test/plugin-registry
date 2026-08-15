@@ -44,37 +44,55 @@ jobs:
           import os, re
 
           body = os.environ.get('ISSUE_BODY', '')
+          body = '\n' + body
 
-          def get_field(key):
-              """Parse 'key: value' format from textarea."""
-              pattern = rf'\n{key}:\s*(.+?)(?:\n|$)'
-              m = re.search(pattern, body, re.IGNORECASE)
-              if m:
-                  value = m.group(1).strip()
-                  if value and not value.startswith('_'):
-                      return value
-              return ''
+          def get_after(header_pattern):
+              """Get value after a header, handling the \n\n format used by GitHub Issue Forms."""
+              m = re.search(header_pattern, body, re.IGNORECASE)
+              if not m:
+                  return ''
+              pos = m.end()
+              # Skip any blank lines
+              while pos < len(body) and body[pos] in '\n\r ':
+                  pos += 1
+              # Collect until end of line
+              end = pos
+              while end < len(body) and body[end] not in '\n\r':
+                  end += 1
+              value = body[pos:end].strip()
+              # Skip GitHub's placeholder for unanswered optional fields
+              if value.startswith('_') or not value:
+                  return ''
+              return value
 
-          repo_url = get_field('repository_url')
-          category = get_field('category')
-          icon_path = get_field('icon_path')
+          # ── repo_url ──────────────────────────────────────────────────────
+          repo_url = get_after(r'\n###\s+Repository\s+URL\s*\n\n')
+          if not repo_url:
+              repo_url = get_after(r'\n\*\*\s*Repository\s+URL\s*:\*\*\s*\n\n')
 
           if not repo_url:
-              print("error=repository_url is required")
+              print("error=repo_url is required")
               exit(1)
 
           if not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
-              print("error=repository_url must be https://github.com/owner/repo")
+              print("error=repo_url must be https://github.com/owner/repo")
               exit(1)
+
+          parts = repo_url.replace('https://github.com/', '').split('/')
+          owner = parts[0]
+          repo = parts[1].split('?')[0].strip('/')
+
+          # ── category ───────────────────────────────────────────────────────
+          category = get_after(r'\n###\s+Category\s*\n\n')
 
           if not category:
               print("error=category is required")
               exit(1)
 
-          parts = repo_url.replace('https://github.com/', '').split('/')
-          owner = parts[0]
-          repo = parts[1].strip('/')
+          # ── icon_path ─────────────────────────────────────────────────────
+          icon_path = get_after(r'\n###\s+Icon\s+Path\s*\n\n')
 
+          # Write outputs
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"repo_url={repo_url}\n")
               f.write(f"owner={owner}\n")
@@ -83,7 +101,7 @@ jobs:
               if icon_path:
                   f.write(f"icon_path={icon_path}\n")
 
-          print(f"Parsed: {owner}/{repo} category={category}")
+          print(f"Parsed: repo={owner}/{repo} category={category}")
           PYEOF
 
       # ── Fetch plugin.yml from the plugin's repo ───────────────────────────
