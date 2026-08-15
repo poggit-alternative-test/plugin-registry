@@ -646,6 +646,33 @@ jobs:
             "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
             --field body="$BODY" > /dev/null
 
+      # ── Close the issue ──────────────────────────────────────────────────
+      - name: Close issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          gh api --method PATCH \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}" \
+            --field state=closed \
+            --field state_reason=completed \
+            --silent
+
+      # ── Lock the conversation ───────────────────────────────────────────
+      - name: Lock issue conversation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          gh api --method PUT \
+            "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/lock" \
+            --field lock_reason=resolved \
+            --silent
+
       # ── Remove approved label to prevent duplicate triggers ──────────────────
       # The workflow re-triggers when any label changes, including our own removal.
       # Using a label check on re-run is sufficient to prevent infinite loops.
