@@ -218,9 +218,9 @@ jobs:
 
       # ── Validate icon_path (if submitted) ─────────────────────────────────
       # Only check existence if the user explicitly provided an icon_path.
-      # The three-tier icon_url resolution (submitted path → assets/icon.png →
-      # Axolotl default) is Phase 4's job; this step only verifies that an
-      # explicitly submitted path actually exists in the repo.
+      # The four-tier icon_url resolution (submitted path → icon.png →
+      # assets/icon.png → Axolotl default) is Phase 4's job; this step only
+      # verifies that an explicitly submitted path actually exists in the repo.
       - name: Validate icon_path (if provided)
         if: ${{ steps.parse.outputs.icon_path != '' }}
         env:

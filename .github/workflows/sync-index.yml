@@ -2,12 +2,14 @@ name: Sync Plugin Index
 
 # Keeps all approved plugin entries fresh without requiring resubmission.
 #
-# - Refreshes: version, download_url, download_count, build_tier,
+# - Refreshes: tag, version, download_url, download_count, build_tier,
 #   attestation_checked_at, last_synced_at
 # - Re-resolves icon_url per four-tier fallback (may change if the submitter
 #   uploaded assets/ after approval): submitted icon_path → icon.png →
 #   assets/icon.png → null (frontend uses default)
+# - Marks entries unavailable if their repo or latest release becomes inaccessible
 # - Commits only when something actually changed
+# - NEVER modifies: all_tags, dev_build (managed by approval workflow only)
 on:
   workflow_dispatch:
     inputs:
@@ -123,7 +125,11 @@ jobs:
               return None, None
 
           def refresh_entry(entry):
-              """Refresh a single entry. Returns updated (entry, did_change, reason)."""
+              """Refresh a single entry. Returns updated (entry, did_change, reason).
+
+              NOTE: all_tags and dev_build are NEVER modified by the sync workflow.
+              They are only set or updated by the approval workflow.
+              """
               plugin_id = entry.get('id', '')
               if '/' not in plugin_id:
                   return entry, False, 'invalid_id'
@@ -155,7 +161,8 @@ jobs:
                   entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                   return entry, True, 'release_has_no_phar'
 
-              new_version = release.get('tag_name', '').lstrip('v')
+              new_tag = release.get('tag_name', '')
+              new_version = new_tag.lstrip('v')
               new_download_url = phar_asset['browser_download_url']
               new_download_count = phar_asset.get('download_count', 0)
               phar_url = phar_asset['browser_download_url']
@@ -200,8 +207,11 @@ jobs:
                   owner, repo, entry.get('icon_path'))
 
               # ── Detect changes ─────────────────────────────────────────
+              # NOTE: all_tags and dev_build are intentionally excluded from
+              # the change detection — they are managed by the approval workflow.
               did_change = (
-                  entry.get('version') != new_version
+                  entry.get('tag') != new_tag
+                  or entry.get('version') != new_version
                   or entry.get('download_url') != new_download_url
                   or entry.get('download_count') != new_download_count
                   or entry.get('build_tier') != build_tier
@@ -209,6 +219,7 @@ jobs:
                   or entry.get('unavailable', False) is True  # was previously unavailable
               )
 
+              entry['tag'] = new_tag
               entry['version'] = new_version
               entry['download_url'] = new_download_url
               entry['download_count'] = new_download_count
@@ -218,6 +229,12 @@ jobs:
               entry['icon_url'] = new_icon_url
               entry['unavailable'] = False
               entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+              # all_tags and dev_build are preserved exactly as-is — never modified by sync.
+              if 'all_tags' not in entry:
+                  entry['all_tags'] = []
+              if 'dev_build' not in entry:
+                  entry['dev_build'] = None
 
               return entry, did_change, 'updated' if did_change else 'unchanged'
 

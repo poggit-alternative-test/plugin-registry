@@ -35,7 +35,35 @@
 
     "version": {
       "type": "string",
-      "description": "Latest version string from the most recent GitHub Release tag."
+      "description": "Latest version string from the most recent GitHub Release tag (stripped of any leading 'v' prefix). Used for display."
+    },
+
+    "tag": {
+      "type": "string",
+      "description": "Full Git tag of the latest approved release (e.g. 'v1.2.0' or 'nightly'). Includes any 'v' prefix. Used as the canonical tag identifier."
+    },
+
+    "all_tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "All submitted stable release tags in chronological order (newest first). Only includes tags that were submitted via the approval workflow. The approval workflow appends new tags; the sync workflow never modifies this field."
+    },
+
+    "dev_build": {
+      "type": ["object", "null"],
+      "description": "Latest dev/nightly build. Only populated when tag === 'nightly'. Set by the approval workflow; the sync workflow never modifies it.",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "description": "The nightly build tag (e.g. 'nightly-20240815')."
+        },
+        "download_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to the nightly .phar asset."
+        }
+      },
+      "required": ["tag", "download_url"]
     },
 
     "api": {
@@ -63,12 +91,12 @@
 
     "icon_path": {
       "type": ["string", "null"],
-      "description": "Relative path to the icon file inside the plugin's repo, as submitted. Null means no explicit path was submitted — the sync workflow will attempt the `assets/icon.png` convention path as the first fallback before using the Axolotl default icon."
+      "description": "Relative path to the icon file inside the plugin's repo, as submitted. Null means no explicit path was submitted — the sync workflow will attempt icon.png then assets/icon.png as fallbacks before using the Axolotl default icon."
     },
 
     "icon_url": {
       "type": ["string", "null"],
-      "description": "Resolved raw.githubusercontent.com URL for the icon. Resolution order (Phase 4 sync workflow): (1) submitted icon_path → (2) convention path `assets/icon.png` → (3) Axolotl's own default icon (constant TBD, set in Phase 5). Each step is attempted only if the previous returned 404. The URL uses the literal `HEAD` segment in place of a branch name (e.g. `/owner/repo/HEAD/assets/icon.png`); GitHub resolves this server-side to the current default branch, so no prior API call to look up the default branch is needed."
+      "description": "Resolved raw.githubusercontent.com URL for the icon. Resolution order (sync workflow): (1) submitted icon_path → (2) icon.png → (3) assets/icon.png → (4) Axolotl's own default icon. Each step is attempted only if the previous returned 404. The URL uses the literal HEAD segment (e.g. /owner/repo/HEAD/icon.png); GitHub resolves this server-side to the current default branch."
     },
 
     "repo_url": {

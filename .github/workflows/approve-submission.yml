@@ -42,6 +42,8 @@ jobs:
       build_tier: ${{ steps.attestation.outputs.build_tier }}
       attestation_checked_at: ${{ steps.attestation.outputs.checked_at }}
       phar_found: ${{ steps.release-check.outputs.phar_found }}
+      is_nightly: ${{ steps.release-check.outputs.is_nightly }}
+      dev_build_tag: ${{ steps.release-check.outputs.dev_build_tag }}
 
     steps:
       # ── Parse issue body ───────────────────────────────────────────────────
@@ -256,6 +258,17 @@ jobs:
           echo "asset_id=$ASSET_ID" >> "$GITHUB_OUTPUT"
           echo "download_count=${DOWNLOAD_COUNT:-0}" >> "$GITHUB_OUTPUT"
           echo "phar_found=true" >> "$GITHUB_OUTPUT"
+
+          # Detect nightly build — nightly releases are approved as-is.
+          # The sync workflow only syncs stable releases (is_nightly is used
+          # by approval to populate dev_build in the index entry).
+          if echo "$RELEASE_TAG" | grep -qi "nightly"; then
+            echo "is_nightly=true" >> "$GITHUB_OUTPUT"
+            echo "dev_build_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_nightly=false" >> "$GITHUB_OUTPUT"
+            echo "dev_build_tag=" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── Check SLSA attestation ─────────────────────────────────────────────
       - name: Check SLSA attestation
@@ -493,6 +506,8 @@ jobs:
           DOWNLOAD_COUNT: ${{ needs.validate.outputs.download_count }}
           BUILD_TIER: ${{ needs.validate.outputs.build_tier }}
           ATTESTATION_CHECKED_AT: ${{ needs.validate.outputs.attestation_checked_at }}
+          IS_NIGHTLY: ${{ needs.validate.outputs.is_nightly }}
+          DEV_BUILD_TAG: ${{ needs.validate.outputs.dev_build_tag }}
           AUTHOR_LIST: ${{ steps.author.outputs.author_list }}
         run: |
           python3 << 'PYEOF'
@@ -548,30 +563,17 @@ jobs:
           icon_url = env('ICON_URL').strip()
           icon_url = None if icon_url in ('null', '') else icon_url
 
+          release_tag = env('RELEASE_TAG').strip()
+          download_url = env('DOWNLOAD_URL').strip()
+          is_nightly = env('IS_NIGHTLY').strip().lower() == 'true'
+          dev_build_tag = env('DEV_BUILD_TAG').strip()
+
+          # version is the tag stripped of leading 'v'
+          version = release_tag.lstrip('v')
+
           now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-          entry = {
-              'id': f'{owner}/{repo}',
-              'name': env('PLUGIN_NAME'),
-              'version': env('RELEASE_TAG').lstrip('v'),
-              'api': api_list,
-              'author': author_list,
-              'description': strip_wrapping_quotes(env('PLUGIN_DESCRIPTION')),
-              'category': env('CATEGORY'),
-              'icon_path': icon_path,
-              'icon_url': icon_url,
-              'repo_url': env('REPO_URL'),
-              'download_url': env('DOWNLOAD_URL'),
-              'download_count': download_count,
-              'build_tier': build_tier,
-              'attestation_checked_at': checked_at,
-              'approved_at': now,
-              'last_synced_at': now,
-          }
-
-          print("Generated entry:")
-          print(json.dumps(entry, indent=2))
-
+          # ── Load existing index ───────────────────────────────────────────
           index_path = 'data/index.json'
           if os.path.exists(index_path) and os.path.getsize(index_path) > 0:
               with open(index_path) as f:
@@ -579,14 +581,65 @@ jobs:
           else:
               index = []
 
-          # Replace existing entry with the same id, or append.
-          ids = [i for i, e in enumerate(index) if e.get('id') == entry['id']]
+          # ── Find existing entry ────────────────────────────────────────────
+          ids = [i for i, e in enumerate(index) if e.get('id') == f'{owner}/{repo}']
+
           if ids:
-              index[ids[0]] = entry
+              # Update existing entry
+              entry = index[ids[0]]
+              entry['tag'] = release_tag
+              entry['version'] = version
+              entry['download_url'] = download_url
+              entry['build_tier'] = build_tier
+              entry['attestation_checked_at'] = checked_at
+              entry['last_synced_at'] = now
+
+              # Append new tag to all_tags if not already present (newest first)
+              if release_tag not in entry.get('all_tags', []):
+                  entry.setdefault('all_tags', []).insert(0, release_tag)
+
+              # Set/update dev_build only for nightly releases (only approval sets this)
+              if is_nightly and dev_build_tag:
+                  entry['dev_build'] = {
+                      'tag': dev_build_tag,
+                      'download_url': download_url,
+                  }
+
               action = 'updated'
+              print(f"Updated existing entry: {entry['id']}")
           else:
+              # New entry
+              entry = {
+                  'id': f'{owner}/{repo}',
+                  'name': env('PLUGIN_NAME'),
+                  'tag': release_tag,
+                  'version': version,
+                  'api': api_list,
+                  'author': author_list,
+                  'description': strip_wrapping_quotes(env('PLUGIN_DESCRIPTION')),
+                  'category': env('CATEGORY'),
+                  'icon_path': icon_path,
+                  'icon_url': icon_url,
+                  'repo_url': env('REPO_URL'),
+                  'download_url': download_url,
+                  'download_count': download_count,
+                  'build_tier': build_tier,
+                  'attestation_checked_at': checked_at,
+                  'approved_at': now,
+                  'last_synced_at': now,
+                  'all_tags': [release_tag],
+                  'dev_build': None,
+              }
+              # For new nightly submissions, populate dev_build immediately
+              if is_nightly and dev_build_tag:
+                  entry['dev_build'] = {
+                      'tag': dev_build_tag,
+                      'download_url': download_url,
+                  }
+
               index.append(entry)
               action = 'added'
+              print(f"Added new entry: {entry['id']}")
 
           with open(index_path, 'w') as f:
               json.dump(index, f, indent=2)
@@ -604,7 +657,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           PLUGIN_NAME: ${{ needs.validate.outputs.plugin_name }}
-          PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
           ACTION: ${{ steps.write.outputs.action }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -619,7 +672,7 @@ jobs:
             exit 0
           }
 
-          git commit -m "Add plugin: ${PLUGIN_NAME} v${PLUGIN_VERSION}"
+          git commit -m "Add/update plugin: ${PLUGIN_NAME} (${RELEASE_TAG})"
 
           # Push using GITHUB_TOKEN — actions bot can push to the repo
           # because the workflow has contents:write permission.
@@ -635,7 +688,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           PLUGIN_NAME: ${{ needs.validate.outputs.plugin_name }}
-          PLUGIN_VERSION: ${{ needs.validate.outputs.plugin_version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
           ACTION: ${{ steps.write.outputs.action }}
         run: |
           BODY="\
@@ -643,7 +696,7 @@ jobs:
 
           ## ✅ Plugin Approved
 
-          **${PLUGIN_NAME}** v${PLUGIN_VERSION} has been $ACTION to the registry index.
+          **${PLUGIN_NAME}** (${RELEASE_TAG}) has been $ACTION to the registry index.
 
           It will appear on the site shortly. You do not need to resubmit for
           future version updates — the sync workflow refreshes all plugins
