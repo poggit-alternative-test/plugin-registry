@@ -19,6 +19,8 @@ jobs:
   validate:
     name: Re-validate submission
     runs-on: ubuntu-latest
+    # Guard: only proceed when the 'approved' label was added.
+    if: github.event.label.name == 'approved'
     outputs:
       status: ${{ steps.result.outputs.status }}
       error: ${{ steps.result.outputs.error }}
@@ -42,11 +44,6 @@ jobs:
       phar_found: ${{ steps.release-check.outputs.phar_found }}
 
     steps:
-      # Guard: only proceed when the 'approved' label was added.
-      - name: Guard — approved label only
-        if: github.event.label.name != 'approved'
-        run: exit 0
-
       # ── Parse issue body ───────────────────────────────────────────────────
       # Parses both Issue Form (### headers) and API/markdown formats.
       # plugin.yml-derived fields in the body are for reference only — always
@@ -134,6 +131,7 @@ jobs:
 
       # ── Fetch plugin.yml ────────────────────────────────────────────────────
       - name: Fetch plugin.yml
+        id: plugin-yml
         env:
           OWNER: ${{ steps.parse.outputs.owner }}
           REPO: ${{ steps.parse.outputs.repo }}
@@ -263,6 +261,7 @@ jobs:
       - name: Check SLSA attestation
         id: attestation
         env:
+          GH_TOKEN: ${{ github.token }}
           OWNER: ${{ steps.parse.outputs.owner }}
           REPO: ${{ steps.parse.outputs.repo }}
           DOWNLOAD_URL: ${{ steps.release-check.outputs.download_url }}
@@ -417,11 +416,11 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Parse plugin.yml again in this job ──────────────────────────────
-      # ── Parse plugin.yml again in this job ──────────────────────────────
       # (No `needs` dependency on a job output since we're in a new runner.
       # Re-running the fetch is cheap and avoids needing to pass large files
       # through job outputs.)
       - name: Re-fetch plugin.yml
+        id: reparse-plugin
         env:
           OWNER: ${{ needs.validate.outputs.owner }}
           REPO: ${{ needs.validate.outputs.repo }}
@@ -467,6 +466,7 @@ jobs:
 
       # ── Build and write index entry ──────────────────────────────────────
       - name: Update data/index.json
+        id: write
         env:
           OWNER: ${{ needs.validate.outputs.owner }}
           REPO: ${{ needs.validate.outputs.repo }}
@@ -625,6 +625,7 @@ jobs:
       # ── Post approval comment on the issue ─────────────────────────────────
       - name: Post approval comment
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -655,6 +656,7 @@ jobs:
       # Using a label check on re-run is sufficient to prevent infinite loops.
       - name: Remove approved label
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -677,6 +679,7 @@ jobs:
     steps:
       - name: Post failure comment
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -714,6 +717,7 @@ jobs:
 
       - name: Remove approved label
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
