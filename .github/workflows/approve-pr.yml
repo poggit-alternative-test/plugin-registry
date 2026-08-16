@@ -118,6 +118,8 @@ jobs:
                 category = submission.get('category', '')
                 icon_path = submission.get('icon_path')
                 keywords = submission.get('keywords', [])
+                fork = submission.get('fork', False)
+                forked_from = submission.get('forked_from')
 
                 # Validate
                 if not repo_url:
@@ -326,9 +328,13 @@ jobs:
                         'featured_marked_at': None,
                         'submission_pr_number': int(pr_number) if pr_number else None,
                         'keywords': keywords if keywords else [],
+                        'fork': fork,
+                        'forked_from': forked_from,
                     }
                     index.append(entry)
                     print(f"\n  ✓ Added new entry: {plugin_id}")
+                    if fork:
+                        print(f"     (forked from: {forked_from})")
 
                 processed_files.append(filepath)
 

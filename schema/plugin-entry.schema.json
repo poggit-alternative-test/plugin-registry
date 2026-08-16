@@ -172,6 +172,16 @@
     "submission_pr_number": {
       "type": ["integer", "null"],
       "description": "PR number used for the initial submission. Used for tracking and featured label management."
+    },
+
+    "fork": {
+      "type": "boolean",
+      "description": "True if this plugin was submitted from a fork. Forks are only allowed when the original repository is not already in the registry."
+    },
+
+    "forked_from": {
+      "type": ["string", "null"],
+      "description": "The original repository this plugin was forked from (e.g. 'upstream/repo'). Only populated when fork is true."
     }
   }
 }

@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
-# Minimal permissions: read repo contents
+# Permissions: read contents + read collaborator status via GitHub token
 permissions:
   contents: read
 
@@ -158,6 +158,190 @@ jobs:
                         echo "All files validated successfully!"
                     fi
 
+      # ── Security: Verify user has permission to the submitted repo ───────────
+      - name: Verify repository permissions
+        id: check-permissions
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+          GH_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 << 'PYEOF'
+            import os
+            import urllib.request
+            import json
+
+            files = os.environ.get('FILES', '').strip()
+            pr_author = os.environ.get('PR_AUTHOR', '')
+            gh_token = os.environ.get('GH_TOKEN', '')
+
+            if not files:
+                print("No files to process")
+                exit(0)
+
+            if not pr_author:
+                print("::error::Could not determine PR author")
+                exit(1)
+
+            print(f"PR Author: {pr_author}")
+            print("="*50)
+
+            PERMISSION_ERRORS = 0
+
+            for filepath in files.split('\n'):
+                filepath = filepath.strip()
+                if not filepath:
+                    continue
+
+                print(f"\nChecking permissions for: {filepath}")
+
+                try:
+                    import yaml
+                    with open(filepath) as f:
+                        data = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"::error file={filepath}::Failed to read YAML: {e}")
+                    PERMISSION_ERRORS += 1
+                    continue
+
+                repo_url = data.get('repo_url', '')
+                if not repo_url:
+                    continue
+
+                parts = repo_url.replace('https://github.com/', '').split('/')
+                owner = parts[0]
+                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+
+                print(f"  Repository: {owner}/{repo}")
+
+                # ── Check if this is a fork ──────────────────────────────────────
+                repo_info_url = f"https://api.github.com/repos/{owner}/{repo}"
+                req = urllib.request.Request(repo_info_url, headers={
+                    'Accept': 'application/vnd.github+json',
+                    'Authorization': f'Bearer {gh_token}',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                })
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        repo_info = json.loads(resp.read())
+                        is_fork = repo_info.get('fork', False)
+                        parent = repo_info.get('parent')
+                        source_repo = repo_info.get('source', {})
+                except urllib.error.HTTPError as e:
+                    print(f"  ✗ Could not fetch repository info (HTTP {e.code})")
+                    print(f"::error file={filepath}::Failed to fetch repository information")
+                    PERMISSION_ERRORS += 1
+                    continue
+                except Exception as e:
+                    print(f"  ✗ Error: {e}")
+                    print(f"::error file={filepath}::Failed to fetch repository information")
+                    PERMISSION_ERRORS += 1
+                    continue
+
+                if is_fork and parent:
+                    parent_full_name = parent.get('full_name', '')
+                    print(f"  ⚠️  This is a fork of: {parent_full_name}")
+                    print(f"  Checking if original is already in registry...")
+
+                    # Check if original repo is in the index
+                    index_path = 'data/index.json'
+                    original_in_registry = False
+                    if os.path.exists(index_path):
+                        with open(index_path) as f:
+                            index = json.load(f)
+                            for entry in index:
+                                entry_id = entry.get('id', '')
+                                # Check both parent and source (for forks of forks)
+                                if entry_id == parent_full_name or (source_repo and entry_id == source_repo.get('full_name', '')):
+                                    original_in_registry = True
+                                    print(f"  ✗ Original repo '{entry_id}' is already in the registry")
+                                    print(f"::error file={filepath}::Fork submissions not allowed when original repository is in the registry")
+                                    print(f"  The plugin '{parent_full_name}' is already listed. Fork submissions are only")
+                                    print(f"  allowed when the original repository is not yet registered.")
+                                    PERMISSION_ERRORS += 1
+                                    break
+
+                    if not original_in_registry:
+                        print(f"  ✓ Original not in registry - fork submission allowed")
+                        print(f"  Writing fork metadata...")
+
+                        # Add fork metadata to submission file
+                        data['fork'] = True
+                        data['forked_from'] = parent_full_name
+                        with open(filepath, 'w') as f:
+                            import yaml
+                            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+                        print(f"  Added fork: true, forked_from: {parent_full_name}")
+
+                elif owner == pr_author:
+                    print(f"  ✓ Author owns this repository")
+                    print(f"  → Permission check passed")
+
+                    # Remove any fork metadata if present
+                    if data.get('fork'):
+                        del data['fork']
+                    if data.get('forked_from'):
+                        del data['forked_from']
+                    with open(filepath, 'w') as f:
+                        import yaml
+                        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+                else:
+                    # ── Check: Is author a collaborator with push access? ─────────
+                    print(f"  Checking collaboration status...")
+
+                    collab_url = f"https://api.github.com/repos/{owner}/{repo}/collaborators/{pr_author}/permission"
+                    req = urllib.request.Request(collab_url, headers={
+                        'Accept': 'application/vnd.github+json',
+                        'Authorization': f'Bearer {gh_token}',
+                        'X-GitHub-Api-Version': '2022-11-28',
+                    })
+
+                    try:
+                        with urllib.request.urlopen(req, timeout=30) as resp:
+                            perm_data = json.loads(resp.read())
+                            permission = perm_data.get('permission', '')
+
+                            # push, maintain, or admin = can manage releases
+                            if permission in ['admin', 'push', 'maintain']:
+                                print(f"  ✓ Author has {permission} permission")
+                                print(f"  → Permission check passed")
+                            else:
+                                print(f"  ✗ Author has {permission} permission (insufficient)")
+                                print(f"::error file={filepath}::You do not have permission to submit this repository")
+                                print(f"  Only the repository owner or collaborators with push/maintain/admin access")
+                                print(f"  can submit a plugin. Your current permission: {permission}")
+                                PERMISSION_ERRORS += 1
+
+                    except urllib.error.HTTPError as e:
+                        if e.code == 404:
+                            print(f"  ✗ Author is not a collaborator on this repository")
+                            print(f"::error file={filepath}::You do not have permission to submit this repository")
+                            print(f"  Only the repository owner or collaborators with push/maintain/admin access")
+                            print(f"  can submit a plugin.")
+                            PERMISSION_ERRORS += 1
+                        elif e.code == 403:
+                            print(f"  ✗ Cannot verify permissions (API rate limit or access denied)")
+                            print(f"  ::warning file={filepath}::Could not verify collaboration status")
+                        else:
+                            print(f"  ✗ Error checking permission (HTTP {e.code})")
+                            print(f"::error file={filepath}::Failed to verify repository permissions")
+                            PERMISSION_ERRORS += 1
+                    except Exception as e:
+                        print(f"  ✗ Error: {e}")
+                        print(f"::error file={filepath}::Failed to verify repository permissions")
+                        PERMISSION_ERRORS += 1
+
+            print("\n" + "="*50)
+            if PERMISSION_ERRORS > 0:
+                print(f"Permission check failed: {PERMISSION_ERRORS} error(s)")
+                print("Only repository owners or collaborators can submit plugins.")
+                exit(1)
+            else:
+                print("All permission checks passed!")
+            PYEOF
+
       # ── Fetch plugin.yml from each repo ──────────────────────────────────
       - name: Fetch plugin.yml from repositories
         id: fetch-plugin-yml
@@ -168,7 +352,6 @@ jobs:
           python3 << 'PYEOF'
             import os
             import re
-            import subprocess
             import urllib.request
             import json
 
@@ -176,8 +359,6 @@ jobs:
             if not files:
                 print("No files to process")
                 exit(0)
-
-            VALID_CATEGORIES = "admin economy chat world protection gameplay fun api tools misc".split()
 
             for filepath in files.split('\n'):
                 filepath = filepath.strip()
