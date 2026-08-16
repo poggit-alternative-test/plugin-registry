@@ -1,0 +1,16 @@
+# Example submission
+# Copy this file and rename it to your plugin's owner-repo format
+# e.g., if your repo is https://github.com/john/my-plugin
+# rename this file to: john-my-plugin.yaml
+
+# Required
+repo_url: https://github.com/owner/plugin-name
+category: economy
+
+# Optional
+icon_path: assets/icon.png
+
+# Optional - keywords for search (max 10)
+keywords:
+  - economy
+  - shop

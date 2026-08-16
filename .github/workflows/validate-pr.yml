@@ -1,0 +1,331 @@
+name: Validate Plugin Submission
+
+# Triggered when a PR is opened, synchronized, or modified.
+# Validates the submission YAML files in the submissions/ folder.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# Minimal permissions: read repo contents
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate submission
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout PR branch ──────────────────────────────────────────────────
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      # ── Find submission files ──────────────────────────────────────────────
+      - name: Find submission files
+        id: find-files
+        run: |
+          # Find all YAML files in submissions/ folder
+          FILES=$(find submissions -name "*.yaml" -o -find submissions -name "*.yml" 2>/dev/null | sort)
+
+          if [ -z "$FILES" ]; then
+            echo "No submission files found in submissions/ folder"
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found submission files:"
+          echo "$FILES"
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$FILES" | wc -l)" >> "$GITHUB_OUTPUT"
+
+      # ── Fail if no files ─────────────────────────────────────────────────
+      - name: Check for submission files
+        if: steps.find-files.outputs.files == ''
+        run: |
+          echo "::error::No submission files found in submissions/ folder"
+          echo ""
+          echo "To submit a plugin, create a YAML file in the submissions/ folder."
+          echo "Example: submissions/owner-repo.yaml"
+          exit 1
+
+      # ── Validate each submission file ──────────────────────────────────────
+      - name: Validate submission files
+        id: validate
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+        run: |
+          set -e
+
+          VALID_CATEGORIES="admin economy chat world protection gameplay fun api tools misc"
+          ERRORS=0
+
+          for FILE in $FILES; do
+            echo ""
+            echo "========================================"
+            echo "Validating: $FILE"
+            echo "========================================"
+
+            # Check if file exists
+            if [ ! -f "$FILE" ]; then
+              echo "::error file=$FILE::File not found"
+              ERRORS=$((ERRORS + 1))
+              continue
+            fi
+
+            # Parse YAML fields using Python
+            python3 << PYEOF
+            import sys
+            import os
+            import re
+            import yaml
+
+            FILE = os.environ.get('FILE', '$FILE')
+            VALID_CATEGORIES = '$VALID_CATEGORIES'.split()
+
+            errors = []
+
+            try:
+                with open(FILE) as f:
+                    data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                print(f"::error file={FILE}::YAML syntax error: {e}")
+                sys.exit(1)
+
+            # ── Required: repo_url ──────────────────────────────────────────────
+            repo_url = data.get('repo_url', '')
+            if not repo_url:
+                errors.append("repo_url is required")
+            elif not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
+                errors.append("repo_url must be a valid GitHub URL (https://github.com/owner/repo)")
+            else:
+                print(f"  repo_url: {repo_url} ✓")
+                # Parse owner/repo for later use
+                parts = repo_url.replace('https://github.com/', '').split('/')
+                owner = parts[0]
+                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+                print(f"  parsed: owner={owner}, repo={repo}")
+
+            # ── Required: category ──────────────────────────────────────────────
+            category = data.get('category', '')
+            if not category:
+                errors.append("category is required")
+            elif category not in VALID_CATEGORIES:
+                errors.append(f"category must be one of: {' '.join(VALID_CATEGORIES)}")
+            else:
+                print(f"  category: {category} ✓")
+
+            # ── Optional: icon_path ─────────────────────────────────────────────
+            icon_path = data.get('icon_path', '')
+            if icon_path:
+                print(f"  icon_path: {icon_path} ✓")
+            else:
+                print(f"  icon_path: (not provided)")
+
+            # ── Optional: keywords ──────────────────────────────────────────────
+            keywords = data.get('keywords', [])
+            if keywords:
+                if not isinstance(keywords, list):
+                    errors.append("keywords must be an array")
+                elif len(keywords) > 10:
+                    errors.append("keywords cannot have more than 10 items")
+                else:
+                    print(f"  keywords: {', '.join(keywords)} ✓ ({len(keywords)} items)")
+
+            # Report errors
+            if errors:
+                print("")
+                for err in errors:
+                    print(f"::error file={FILE}::{err}")
+                sys.exit(1)
+            else:
+                print("")
+                print(f"✓ {FILE}: Validation passed")
+
+            PYEOF
+
+                        if [ $? -ne 0 ]; then
+                        ERRORS=$((ERRORS + 1))
+                        fi
+                    done
+
+                    echo ""
+                    echo "========================================"
+                    if [ $ERRORS -gt 0 ]; then
+                        echo "Validation failed with $ERRORS error(s)"
+                        exit 1
+                    else
+                        echo "All files validated successfully!"
+                    fi
+
+      # ── Fetch plugin.yml from each repo ──────────────────────────────────
+      - name: Fetch plugin.yml from repositories
+        id: fetch-plugin-yml
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 << 'PYEOF'
+            import os
+            import re
+            import subprocess
+            import urllib.request
+            import json
+
+            files = os.environ.get('FILES', '').strip()
+            if not files:
+                print("No files to process")
+                exit(0)
+
+            VALID_CATEGORIES = "admin economy chat world protection gameplay fun api tools misc".split()
+
+            for filepath in files.split('\n'):
+                filepath = filepath.strip()
+                if not filepath:
+                    continue
+
+                print(f"\n{'='*50}")
+                print(f"Processing: {filepath}")
+                print('='*50)
+
+                try:
+                    import yaml
+                    with open(filepath) as f:
+                        data = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"::error file={filepath}::Failed to parse YAML: {e}")
+                    continue
+
+                repo_url = data.get('repo_url', '')
+                if not repo_url:
+                    continue
+
+                parts = repo_url.replace('https://github.com/', '').split('/')
+                owner = parts[0]
+                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+
+                print(f"Fetching plugin.yml from {owner}/{repo}...")
+
+                # Fetch plugin.yml
+                url = f"https://api.github.com/repos/{owner}/{repo}/contents/plugin.yml"
+                req = urllib.request.Request(url, headers={
+                    'Accept': 'application/vnd.github+json',
+                    'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                })
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        import base64
+                        content_data = json.loads(resp.read())
+                        content = base64.b64decode(content_data['content']).decode('utf-8')
+
+                        # Parse plugin.yml
+                        name = re.search(r'^name:\s*(.+)$', content, re.MULTILINE)
+                        version = re.search(r'^version:\s*(.+)$', content, re.MULTILINE)
+
+                        print(f"  plugin.yml found ✓")
+                        if name:
+                            print(f"  name: {name.group(1).strip()}")
+                        if version:
+                            print(f"  version: {version.group(1).strip()}")
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        print(f"::error file={filepath}::plugin.yml not found in {owner}/{repo}")
+                    else:
+                        print(f"::error file={filepath}::Failed to fetch plugin.yml (HTTP {e.code})")
+                except Exception as e:
+                    print(f"::error file={filepath}::Error: {e}")
+
+            print("\n" + "="*50)
+            print("plugin.yml check complete")
+            print("="*50)
+
+            PYEOF
+
+      # ── Check for stable release ─────────────────────────────────────────
+      - name: Check stable releases
+        id: check-releases
+        env:
+          FILES: ${{ steps.find-files.outputs.files }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 << 'PYEOF'
+            import os
+            import urllib.request
+            import json
+
+            files = os.environ.get('FILES', '').strip()
+            if not files:
+                exit(0)
+
+            for filepath in files.split('\n'):
+                filepath = filepath.strip()
+                if not filepath:
+                    continue
+
+                try:
+                    import yaml
+                    with open(filepath) as f:
+                        data = yaml.safe_load(f) or {}
+                except:
+                    continue
+
+                repo_url = data.get('repo_url', '')
+                if not repo_url:
+                    continue
+
+                parts = repo_url.replace('https://github.com/', '').split('/')
+                owner = parts[0]
+                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+
+                print(f"Checking releases for {owner}/{repo}...")
+
+                # Check latest release
+                url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+                req = urllib.request.Request(url, headers={
+                    'Accept': 'application/vnd.github+json',
+                    'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                })
+
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        release = json.loads(resp.read())
+                        tag = release.get('tag_name', 'unknown')
+                        assets = release.get('assets', [])
+
+                        phar_found = False
+                        for asset in assets:
+                            if asset['name'].lower().endswith('.phar'):
+                                phar_found = True
+                                print(f"  Release: {tag} ✓")
+                                print(f"  .phar asset: {asset['name']} ✓")
+                                break
+
+                        if not phar_found:
+                            print(f"::warning file={filepath}::No .phar asset found in latest release ({tag})")
+                            print(f"  A stable release with .phar is required for listing")
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        print(f"::error file={filepath}::No stable release found in {owner}/{repo}")
+                        print(f"  Create a release with a .phar asset first")
+                    else:
+                        print(f"::warning::Failed to check releases (HTTP {e.code})")
+                except Exception as e:
+                    print(f"::warning::Error checking releases: {e}")
+
+            PYEOF
+
+      # ── Summary ──────────────────────────────────────────────────────────
+      - name: Validation summary
+        run: |
+          echo ""
+          echo "========================================"
+          echo "Validation Complete"
+          echo "========================================"
+          echo ""
+          echo "Submission files validated:"
+          echo "${{ steps.find-files.outputs.files }}"
+          echo ""
+          echo "If all checks passed, maintainers can review and add the 'approved' label to merge."

@@ -1,0 +1,298 @@
+name: Featured Plugin Monitor
+
+# Monitors and manages featured plugins.
+# - When 'featured' label is added to a submission issue: sets featured: true
+# - When 'featured' label is removed: sets featured: false
+# - Scheduled: enforces max 10 featured plugins
+on:
+  issues:
+    types: [labeled, unlabeled]
+  schedule:
+    # Every hour at :30
+    - cron: '30 * * * *'
+  workflow_dispatch:
+
+# Permissions
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # ── Handle label changes ────────────────────────────────────────────────
+  handle-label:
+    name: Handle featured label
+    runs-on: ubuntu-latest
+    # Only run on issue events
+    if: github.event_name == 'issues'
+    outputs:
+      action: ${{ steps.process.outputs.action }}
+      plugin_id: ${{ steps.process.outputs.plugin_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Check if it's a featured label change ─────────────────────────
+      - name: Check label
+        id: check-label
+        run: |
+          LABEL_NAME="${{ github.event.label.name }}"
+          echo "Label changed: $LABEL_NAME"
+          echo "Action: ${{ github.event.action }}"
+
+          if [ "$LABEL_NAME" = "featured" ]; then
+            echo "is_featured_change=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_featured_change=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Skip if not featured label ────────────────────────────────────
+      - name: Skip if not featured
+        if: steps.check-label.outputs.is_featured_change != 'true'
+        run: exit 0
+
+      # ── Find plugin by issue number ────────────────────────────────────
+      - name: Find plugin
+        id: find-plugin
+        run: |
+          ISSUE_NUMBER=${{ github.event.issue.number }}
+
+          # Find entry with matching submission_issue_number
+          RESULT=$(python3 << 'PYEOF'
+          import json
+          import os
+
+          issue_number = int(os.environ.get('ISSUE_NUMBER', '0'))
+
+          with open('data/index.json') as f:
+              index = json.load(f)
+
+          for i, entry in enumerate(index):
+              if entry.get('submission_issue_number') == issue_number:
+                  print(f"found={entry['id']}")
+                  print(f"index={i}")
+                  print(f"featured={entry.get('featured', False)}")
+                  exit(0)
+
+          print("found=none")
+          PYEOF
+
+          echo "$RESULT"
+          echo "$RESULT" >> "$GITHUB_OUTPUT"
+
+      # ── Skip if no matching plugin found ───────────────────────────────
+      - name: Skip if not found
+        if: steps.find-plugin.outputs.found == 'none'
+        run: |
+          echo "No plugin found with submission_issue_number=${{ github.event.issue.number }}"
+          echo "This issue may not be linked to a plugin entry."
+          exit 0
+
+      # ── Update featured status ─────────────────────────────────────────
+      - name: Update featured status
+        id: process
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PLUGIN_ID: ${{ steps.find-plugin.outputs.found }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -e
+
+          python3 << 'PYEOF'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          issue_number = int(os.environ.get('ISSUE_NUMBER', '0'))
+          plugin_id = os.environ.get('PLUGIN_ID', '')
+          action = os.environ.get('ACTION', '')
+
+          with open('data/index.json') as f:
+              index = json.load(f)
+
+          now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          for i, entry in enumerate(index):
+              if entry.get('id') == plugin_id:
+                  if action == 'labeled':
+                      entry['featured'] = True
+                      entry['featured_marked_at'] = now
+                      print(f"✓ Set featured=true for {plugin_id}")
+                  else:
+                      entry['featured'] = False
+                      entry['featured_marked_at'] = None
+                      print(f"✓ Set featured=false for {plugin_id}")
+                  break
+
+          with open('data/index.json', 'w') as f:
+              json.dump(index, f, indent=2)
+              f.write('\n')
+
+          print(f"Updated index.json")
+          PYEOF
+
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+
+      # ── Commit changes ────────────────────────────────────────────────
+      - name: Commit changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/index.json
+          git diff --staged --quiet && {
+            echo "No changes to commit"
+            exit 0
+          }
+
+          if [ "${{ github.event.action }}" = "labeled" ]; then
+            git commit -m "feat: mark ${{ steps.find-plugin.outputs.found }} as featured"
+          else
+            git commit -m "feat: remove ${{ steps.find-plugin.outputs.found }} from featured"
+          fi
+
+          git push
+
+  # ── Enforce max 10 featured ─────────────────────────────────────────────
+  enforce-max:
+    name: Enforce max featured
+    runs-on: ubuntu-latest
+    # Only run on scheduled or manual triggers
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enforce max 10 featured
+        id: enforce
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          MAX_FEATURED = 10
+
+          with open('data/index.json') as f:
+              index = json.load(f)
+
+          # Get all featured plugins sorted by featured_marked_at
+          featured = [e for e in index if e.get('featured') == True]
+          unfeatured = [e for e in index if e.get('featured') != True]
+
+          print(f"Current featured count: {len(featured)}/{MAX_FEATURED}")
+
+          if len(featured) <= MAX_FEATURED:
+              print("No action needed - under limit")
+              exit(0)
+
+          # Sort by featured_marked_at (oldest first)
+          featured.sort(key=lambda x: x.get('featured_marked_at') or '')
+
+          # Find plugins to unfeature
+          to_remove = featured[MAX_FEATURED:]
+          featured = featured[:MAX_FEATURED]
+
+          if not to_remove:
+              print("No plugins to remove from featured")
+              exit(0)
+
+          print(f"\nPlugins to remove from featured (oldest first):")
+          for p in to_remove:
+              print(f"  - {p['id']} (marked at {p.get('featured_marked_at')})")
+
+          # Update entries
+          now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          removed_plugins = []
+
+          for entry in index:
+              if entry in to_remove:
+                  entry['featured'] = False
+                  entry['featured_marked_at'] = None
+                  removed_plugins.append(entry['id'])
+
+          # Write updated index
+          with open('data/index.json', 'w') as f:
+              json.dump(index, f, indent=2)
+              f.write('\n')
+
+          print(f"\nUpdated {len(removed_plugins)} plugin(s)")
+
+          # Write removed plugins list for next step
+          with open('/tmp/removed.json', 'w') as f:
+              json.dump(removed_plugins, f)
+
+          print("\nDone")
+          PYEOF
+
+      # ── Remove labels from issues ───────────────────────────────────
+      - name: Remove labels from issues
+        if: steps.enforce.outputs.removed != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import json
+          import os
+          import subprocess
+
+          with open('/tmp/removed.json') as f:
+              removed = json.load(f)
+
+          repo = os.environ.get('REPO', '')
+          token = os.environ.get('GH_TOKEN', '')
+
+          print(f"Removing 'featured' label from {len(removed)} issue(s)...")
+
+          # Load index to find issue numbers
+          with open('data/index.json') as f:
+              index = json.load(f)
+
+          for plugin_id in removed:
+              for entry in index:
+                  if entry.get('id') == plugin_id:
+                      issue_num = entry.get('submission_issue_number')
+                      if issue_num:
+                          print(f"  Removing label from issue #{issue_num} ({plugin_id})")
+                          # Use gh CLI to remove label
+                          result = subprocess.run(
+                              ['gh', 'api', f'repos/{repo}/issues/{issue_num}/labels/featured',
+                              '--method', 'DELETE',
+                              '--silent'],
+                              capture_output=True
+                          )
+                          if result.returncode == 0:
+                              print(f"    ✓ Removed")
+                          else:
+                              print(f"    ✗ Failed: {result.stderr.decode()}")
+          PYEOF
+
+      # ── Commit changes ────────────────────────────────────────────────
+      - name: Commit changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/index.json
+          git diff --staged --quiet && {
+            echo "No changes to commit"
+            exit 0
+          }
+
+          git commit -m "chore: enforce max 10 featured plugins"
+          git push
+
+          echo "Committed changes"

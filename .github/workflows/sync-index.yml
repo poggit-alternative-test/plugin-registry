@@ -236,10 +236,20 @@ jobs:
               entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
               # all_tags and dev_build are preserved exactly as-is — never modified by sync.
+              # featured, featured_marked_at, submission_pr_number, keywords are also preserved.
               if 'all_tags' not in entry:
                   entry['all_tags'] = []
               if 'dev_build' not in entry:
                   entry['dev_build'] = None
+              # Ensure featured fields exist (for older entries)
+              if 'featured' not in entry:
+                  entry['featured'] = False
+              if 'featured_marked_at' not in entry:
+                  entry['featured_marked_at'] = None
+              if 'submission_pr_number' not in entry:
+                  entry['submission_pr_number'] = None
+              if 'keywords' not in entry:
+                  entry['keywords'] = []
 
               return entry, did_change, 'updated' if did_change else 'unchanged'
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/07/schema#",
-  "$id": "https://raw.githubusercontent.com/poggit-alternative-test/plugin-registry/main/schema/plugin-entry.schema.json",
+  "$id": "https://raw.githubusercontent.com/axolotl-pm/plugin-registry/main/schema/plugin-entry.schema.json",
   "title": "Registry Index Entry",
   "description": "A single plugin entry in the Axolotl registry index (data/index.json). All plugin.yml-derived fields are re-fetched and overwritten by the sync workflow on every run — never trusted from a submission body.",
 
@@ -89,6 +89,13 @@
       "description": "Axolotl-defined category assigned at submission time and approved by a maintainer."
     },
 
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 10,
+      "description": "User-submitted keywords for search. Max 10 keywords."
+    },
+
     "icon_path": {
       "type": ["string", "null"],
       "description": "Relative path to the icon file inside the plugin's repo, as submitted. Null means no explicit path was submitted — the sync workflow will attempt icon.png then assets/icon.png as fallbacks before using the Axolotl default icon."
@@ -149,6 +156,22 @@
     "unavailable": {
       "type": "boolean",
       "description": "True if the plugin's repo went private, its release was removed, or the .phar asset is otherwise inaccessible. Plugin remains in the index as unavailable rather than being silently dropped."
+    },
+
+    "featured": {
+      "type": "boolean",
+      "description": "True if this plugin is featured. Featured plugins are sorted to the top of the list."
+    },
+
+    "featured_marked_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the featured label was added. Used to determine the oldest featured plugin when max 10 is exceeded."
+    },
+
+    "submission_pr_number": {
+      "type": ["integer", "null"],
+      "description": "PR number used for the initial submission. Used for tracking and featured label management."
     }
   }
 }

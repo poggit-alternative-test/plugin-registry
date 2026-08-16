@@ -4,91 +4,59 @@ Thank you for your interest in adding a plugin to the Axolotl registry!
 
 ---
 
-## Submission via Pull Request (required)
+## Submission via Pull Request
 
-All plugins must be submitted via Pull Request to this repository.
+All plugins must be submitted via Pull Request. This keeps the registry clean and allows automated validation.
 
 ### Prerequisites
 
 Your plugin repository must:
 - Be **public** on GitHub
 - Have a valid **`plugin.yml`** in the repository root
-- Have at least one **GitHub Release** with a **`.phar`** file (built any way you prefer)
-
-> ⚠️ The registry does **not** build anything on your behalf. Your `.phar` must already exist in a Release.
+- Have at least one **GitHub Release** with a **`.phar`** file
 
 ### Steps
 
 1. **Fork** this repository
-2. **Add your plugin** to `data/index.json` (see format below)
-3. **Open a Pull Request**
-4. Wait for automated validation and maintainer review
+
+2. **Create a submission file** in the `submissions/` folder:
+   ```yaml
+   # submissions/owner-repo.yaml
+   repo_url: https://github.com/owner/repo
+   category: economy
+   icon_path: assets/icon.png
+   keywords:
+     - economy
+     - shop
+   ```
+
+3. **Open a Pull Request** to this repository
+
+4. Wait for automated validation
+
+5. A maintainer will review and add the `approved` label
+
+6. Once approved, your plugin will be added to the site
+
+7. Your submission file will be **automatically deleted** after approval
 
 ---
 
-## What happens after you submit
+## Submission File Format
 
-Every submission goes through the same review pipeline:
+### Required Fields
 
-1. **Automated validation** — A GitHub Actions workflow runs read-only checks:
-   - Parses your `plugin.yml` via the GitHub Contents API
-   - Confirms a Release with a `.phar` asset exists
-   - Checks for SLSA attestation (if built with `pmmp-plugin-actions` + `attest: true`)
-   The workflow posts the results as a PR comment.
+| Field | Type | Description |
+|-------|------|-------------|
+| `repo_url` | string | Full GitHub URL to your plugin repository |
+| `category` | string | One of the accepted categories |
 
-2. **Maintainer review** — A human reviews your PR and decides whether to merge.
+### Optional Fields
 
-3. **Merge** — Your plugin is added to the index and appears on the site.
-
-4. **Periodic sync** — Every few hours, data is refreshed automatically (latest version, download counts, attestation status).
-
----
-
-## Plugin entry format
-
-Add an entry to `data/index.json` with this structure:
-
-```json
-{
-  "id": "owner/repo-name",
-  "name": "PluginName",
-  "version": "1.0.0",
-  "api": ["5.0.0"],
-  "author": ["username"],
-  "description": "A short description of what this plugin does.",
-  "category": "economy",
-  "icon_path": null,
-  "icon_url": "https://raw.githubusercontent.com/owner/repo/HEAD/assets/icon.png",
-  "repo_url": "https://github.com/owner/repo",
-  "download_url": "https://github.com/owner/repo/releases/latest/download/Plugin.phar",
-  "download_count": 0,
-  "build_tier": null,
-  "attestation_checked_at": null,
-  "approved_at": null,
-  "last_synced_at": null
-}
-```
-
-### Fields explained
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | Yes | `owner/repo-name` (same as GitHub repo) |
-| `name` | Yes | Plugin display name (from `plugin.yml`) |
-| `version` | Yes | Latest version (from latest Release) |
-| `api` | Yes | Supported API versions (from `plugin.yml`) |
-| `author` | Yes | Array of author names/IDs |
-| `description` | Yes | Short description (from `plugin.yml`) |
-| `category` | Yes | One of the accepted categories (see below) |
-| `icon_path` | No | Path to icon in repo (e.g. `assets/icon.png`), or `null` |
-| `icon_url` | Auto | Auto-generated from `icon_path` or `assets/icon.png` |
-| `repo_url` | Yes | Full GitHub URL |
-| `download_url` | Yes | URL to the `.phar` in latest Release |
-| `download_count` | Auto | Updated by sync workflow |
-| `build_tier` | Auto | `verified`, `built-via-ci`, `unverified`, or `null` |
-| `attestation_checked_at` | Auto | Updated by sync workflow |
-| `approved_at` | Auto | Set by maintainer |
-| `last_synced_at` | Auto | Updated by sync workflow |
+| Field | Type | Description |
+|-------|------|-------------|
+| `icon_path` | string | Path to icon in your repo (e.g., `assets/icon.png`) |
+| `keywords` | array | Search keywords (max 10) |
 
 ### Categories
 
@@ -107,6 +75,65 @@ Add an entry to `data/index.json` with this structure:
 
 ---
 
+## What happens after you submit
+
+1. **Automated validation** — The workflow validates your submission:
+   - Checks YAML format
+   - Fetches `plugin.yml` from your repo
+   - Confirms a Release with `.phar` exists
+
+2. **Maintainer review** — A maintainer reviews and adds the `approved` label
+
+3. **Approval** — Your plugin is added to the index and appears on the site
+
+4. **Submission file deleted** — Your submission file is removed (you can submit again for updates)
+
+---
+
+## Updating your plugin
+
+When you release a new version:
+
+1. Open a **new PR** with your submission file again
+2. The workflow detects it's an update
+3. Your entry is updated with the new version
+
+---
+
+## Re-submission for updates
+
+You can submit the same plugin again for version updates:
+
+1. Create a new PR with a submission file
+2. The approval workflow detects the existing entry
+3. Your entry is **updated** (not duplicated)
+4. The submission file is deleted
+
+---
+
+## Featured Plugins
+
+Maintainers can mark plugins as "featured" by adding the `featured` label to the submission issue.
+
+- Featured plugins appear at the top of the list
+- Maximum **10** featured plugins at a time
+- The oldest featured plugin is automatically unfla when a new one is added
+
+---
+
+## Plugin requirements
+
+To be listed in the registry, a plugin must:
+
+- Be for **PocketMine-MP**
+- Be in a **public** GitHub repository
+- Have a valid **`plugin.yml`** in the repository root
+- Have at least one **GitHub Release** with a **`.phar`** file
+
+There is no requirement that the `.phar` be built in any particular way. Plugins built with `pmmp-plugin-actions` + `attest: true` receive a "Verified build" badge. Plugins with a `.phar` uploaded by GitHub Actions receive a "Built via CI" badge. All other plugins are listed without a badge.
+
+---
+
 ## Build tiers (automatically determined)
 
 | Badge | Requirement |
@@ -114,14 +141,6 @@ Add an entry to `data/index.json` with this structure:
 | **Verified build** | Built with `pmmp-plugin-actions` + `attest: true` |
 | **Built via CI** | `.phar` uploaded by `github-actions[bot]` |
 | *(no badge)* | `.phar` uploaded manually |
-
----
-
-## Keeping your listing up to date
-
-You don't need to submit updates manually. The sync workflow automatically picks up new releases and updates the listing.
-
-If your repository goes **private**, your listing will be marked `unavailable` rather than removed.
 
 ---
 
