@@ -18,43 +18,96 @@ jobs:
 
     steps:
       # ── Checkout PR branch ──────────────────────────────────────────────────
+      # Pinned to the PR's actual head commit (not the default merge ref) so
+      # validation always reflects exactly what the submitter pushed, even if
+      # base has moved on or the PR has a merge conflict with base.
       - name: Checkout PR branch
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      # ── Find submission files ──────────────────────────────────────────────
+      # ── Find submission files (NEWLY ADDED only) ─────────────────────────────
       - name: Find submission files
         id: find-files
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Find all YAML files in submissions/ folder
-          FILES=$(find submissions -name "*.yaml" -o -find submissions -name "*.yml" 2>/dev/null | sort)
+          # Use GitHub API to list files changed in this PR.
+          # This is more reliable than git diff because it works regardless of
+          # branch fetch state and merge conflicts.
 
-          if [ -z "$FILES" ]; then
-            echo "No submission files found in submissions/ folder"
+          python3 - "$PR_NUMBER" "$GITHUB_REPOSITORY" "$GH_TOKEN" << 'PYEOF'
+          import sys
+          import urllib.request
+          import json
+
+          pr_number = sys.argv[1]
+          repo = sys.argv[2]
+          gh_token = sys.argv[3]
+
+          url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
+          req = urllib.request.Request(url, headers={
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {gh_token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+          })
+
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  files = json.loads(resp.read())
+                  added = []
+                  for f in files:
+                      # Only count files with status 'added'
+                      if f.get('status') == 'added' and f.get('filename', '').startswith('submissions/'):
+                          filename = f['filename']
+                          if filename.endswith('.yaml') or filename.endswith('.yml'):
+                              added.append(filename)
+                  # Write result to file (clean output, no debug messages)
+                  with open('/tmp/added_files.txt', 'w') as out:
+                      out.write('\n'.join(sorted(added)))
+          except Exception as e:
+              print(f"::error::Failed to fetch PR files: {e}")
+              sys.exit(1)
+          PYEOF
+
+          # Read the result from file
+          ADDED_FILES=$(cat /tmp/added_files.txt 2>/dev/null)
+
+          if [ -z "$ADDED_FILES" ]; then
+            echo "No new submission files added in this PR"
             echo "files=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Found submission files:"
-          echo "$FILES"
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "count=$(echo "$FILES" | wc -l)" >> "$GITHUB_OUTPUT"
+          echo "Found newly added submission files:"
+          echo "$ADDED_FILES"
 
-      # ── Check for submission files ────────────────────────────────────────
-      - name: Check for submission files
+          {
+            echo "files<<SUBMISSION_FILES_EOF"
+            echo "$ADDED_FILES"
+            echo "SUBMISSION_FILES_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$ADDED_FILES" | wc -l)" >> "$GITHUB_OUTPUT"
+
+      # ── Skip if no submission files (not a plugin submission PR) ──────────
+      - name: Not a plugin submission
         if: steps.find-files.outputs.files == ''
         run: |
-          echo "::error::No submission files found in submissions/ folder"
+          echo "This PR does not contain a plugin submission."
+          echo "Skipping validation - this is not a plugin submission PR."
           echo ""
-          echo "To submit a plugin, create a YAML file in the submissions/ folder."
+          echo "To submit a plugin, add a YAML file to the submissions/ folder."
           echo "Example: submissions/owner-repo.yaml"
-          exit 1
+        # Exit 0 = success, just skip the rest
 
       # ── Enforce one plugin per PR ────────────────────────────────────────
       - name: Enforce one plugin per PR
+        if: steps.find-files.outputs.files != ''
         run: |
           COUNT=$(echo "${{ steps.find-files.outputs.files }}" | wc -l)
           if [ "$COUNT" -gt 1 ]; then
-            echo "::error::Multiple submission files detected: ${{ steps.find-files.outputs.files }}"
+            echo "::error::Multiple submission files detected"
             echo ""
             echo "Error: Only ONE plugin submission per PR is allowed."
             echo "Please create separate PRs for each plugin."
@@ -66,8 +119,10 @@ jobs:
           echo "✓ Exactly one submission file found"
 
       # ── Validate each submission file ──────────────────────────────────────
+      # Only run if submission files exist
       - name: Validate submission files
         id: validate
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
         run: |
@@ -91,74 +146,74 @@ jobs:
 
             # Parse YAML fields using Python
             python3 << PYEOF
-            import sys
-            import os
-            import re
-            import yaml
+          import sys
+          import os
+          import re
+          import yaml
 
-            FILE = os.environ.get('FILE', '$FILE')
-            VALID_CATEGORIES = '$VALID_CATEGORIES'.split()
+          FILE = os.environ.get('FILE', '$FILE')
+          VALID_CATEGORIES = '$VALID_CATEGORIES'.split()
 
-            errors = []
+          errors = []
 
-            try:
-                with open(FILE) as f:
-                    data = yaml.safe_load(f) or {}
-            except yaml.YAMLError as e:
-                print(f"::error file={FILE}::YAML syntax error: {e}")
-                sys.exit(1)
+          try:
+              with open(FILE) as f:
+                  data = yaml.safe_load(f) or {}
+          except yaml.YAMLError as e:
+              print(f"::error file={FILE}::YAML syntax error: {e}")
+              sys.exit(1)
 
-            # ── Required: repo_url ──────────────────────────────────────────────
-            repo_url = data.get('repo_url', '')
-            if not repo_url:
-                errors.append("repo_url is required")
-            elif not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
-                errors.append("repo_url must be a valid GitHub URL (https://github.com/owner/repo)")
-            else:
-                print(f"  repo_url: {repo_url} ✓")
-                # Parse owner/repo for later use
-                parts = repo_url.replace('https://github.com/', '').split('/')
-                owner = parts[0]
-                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
-                print(f"  parsed: owner={owner}, repo={repo}")
+          # ── Required: repo_url ──────────────────────────────────────────────
+          repo_url = data.get('repo_url', '')
+          if not repo_url:
+              errors.append("repo_url is required")
+          elif not re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$', repo_url):
+              errors.append("repo_url must be a valid GitHub URL (https://github.com/owner/repo)")
+          else:
+              print(f"  repo_url: {repo_url} ✓")
+              # Parse owner/repo for later use
+              parts = repo_url.replace('https://github.com/', '').split('/')
+              owner = parts[0]
+              repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+              print(f"  parsed: owner={owner}, repo={repo}")
 
-            # ── Required: category ──────────────────────────────────────────────
-            category = data.get('category', '')
-            if not category:
-                errors.append("category is required")
-            elif category not in VALID_CATEGORIES:
-                errors.append(f"category must be one of: {' '.join(VALID_CATEGORIES)}")
-            else:
-                print(f"  category: {category} ✓")
+          # ── Required: category ──────────────────────────────────────────────
+          category = data.get('category', '')
+          if not category:
+              errors.append("category is required")
+          elif category not in VALID_CATEGORIES:
+              errors.append(f"category must be one of: {' '.join(VALID_CATEGORIES)}")
+          else:
+              print(f"  category: {category} ✓")
 
-            # ── Optional: icon_path ─────────────────────────────────────────────
-            icon_path = data.get('icon_path', '')
-            if icon_path:
-                print(f"  icon_path: {icon_path} ✓")
-            else:
-                print(f"  icon_path: (not provided)")
+          # ── Optional: icon_path ─────────────────────────────────────────────
+          icon_path = data.get('icon_path', '')
+          if icon_path:
+              print(f"  icon_path: {icon_path} ✓")
+          else:
+              print(f"  icon_path: (not provided)")
 
-            # ── Optional: keywords ──────────────────────────────────────────────
-            keywords = data.get('keywords', [])
-            if keywords:
-                if not isinstance(keywords, list):
-                    errors.append("keywords must be an array")
-                elif len(keywords) > 10:
-                    errors.append("keywords cannot have more than 10 items")
-                else:
-                    print(f"  keywords: {', '.join(keywords)} ✓ ({len(keywords)} items)")
+          # ── Optional: keywords ──────────────────────────────────────────────
+          keywords = data.get('keywords', [])
+          if keywords:
+              if not isinstance(keywords, list):
+                  errors.append("keywords must be an array")
+              elif len(keywords) > 10:
+                  errors.append("keywords cannot have more than 10 items")
+              else:
+                  print(f"  keywords: {', '.join(keywords)} ✓ ({len(keywords)} items)")
 
-            # Report errors
-            if errors:
-                print("")
-                for err in errors:
-                    print(f"::error file={FILE}::{err}")
-                sys.exit(1)
-            else:
-                print("")
-                print(f"✓ {FILE}: Validation passed")
+          # Report errors
+          if errors:
+              print("")
+              for err in errors:
+                  print(f"::error file={FILE}::{err}")
+              sys.exit(1)
+          else:
+              print("")
+              print(f"✓ {FILE}: Validation passed")
 
-            PYEOF
+          PYEOF
 
                         if [ $? -ne 0 ]; then
                         ERRORS=$((ERRORS + 1))
@@ -175,347 +230,354 @@ jobs:
                     fi
 
       # ── Security: Verify user has permission to the submitted repo ───────────
+      # Requires real PR context (author, PR number). workflow_dispatch runs
+      # have no github.event.pull_request object, so this step is skipped
+      # for manual runs instead of failing on a missing PR_AUTHOR.
       - name: Verify repository permissions
         id: check-permissions
+        if: steps.find-files.outputs.files != '' && github.event_name == 'pull_request'
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           python3 << 'PYEOF'
-            import os
-            import urllib.request
-            import json
+          import os
+          import urllib.request
+          import json
 
-            files = os.environ.get('FILES', '').strip()
-            pr_author = os.environ.get('PR_AUTHOR', '')
-            gh_token = os.environ.get('GH_TOKEN', '')
+          files = os.environ.get('FILES', '').strip()
+          pr_author = os.environ.get('PR_AUTHOR', '')
+          gh_token = os.environ.get('GH_TOKEN', '')
 
-            if not files:
-                print("No files to process")
-                exit(0)
+          if not files:
+              print("No files to process")
+              exit(0)
 
-            if not pr_author:
-                print("::error::Could not determine PR author")
-                exit(1)
+          if not pr_author:
+              print("::error::Could not determine PR author")
+              exit(1)
 
-            print(f"PR Author: {pr_author}")
-            print("="*50)
+          print(f"PR Author: {pr_author}")
+          print("="*50)
 
-            PERMISSION_ERRORS = 0
+          PERMISSION_ERRORS = 0
 
-            for filepath in files.split('\n'):
-                filepath = filepath.strip()
-                if not filepath:
-                    continue
+          for filepath in files.split('\n'):
+              filepath = filepath.strip()
+              if not filepath:
+                  continue
 
-                print(f"\nChecking permissions for: {filepath}")
+              print(f"\nChecking permissions for: {filepath}")
 
-                try:
-                    import yaml
-                    with open(filepath) as f:
-                        data = yaml.safe_load(f) or {}
-                except Exception as e:
-                    print(f"::error file={filepath}::Failed to read YAML: {e}")
-                    PERMISSION_ERRORS += 1
-                    continue
+              try:
+                  import yaml
+                  with open(filepath) as f:
+                      data = yaml.safe_load(f) or {}
+              except Exception as e:
+                  print(f"::error file={filepath}::Failed to read YAML: {e}")
+                  PERMISSION_ERRORS += 1
+                  continue
 
-                repo_url = data.get('repo_url', '')
-                if not repo_url:
-                    continue
+              repo_url = data.get('repo_url', '')
+              if not repo_url:
+                  continue
 
-                parts = repo_url.replace('https://github.com/', '').split('/')
-                owner = parts[0]
-                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+              parts = repo_url.replace('https://github.com/', '').split('/')
+              owner = parts[0]
+              repo = parts[1].rstrip('/') if len(parts) > 1 else ''
 
-                print(f"  Repository: {owner}/{repo}")
+              print(f"  Repository: {owner}/{repo}")
 
-                # ── Check if this is a fork ──────────────────────────────────────
-                repo_info_url = f"https://api.github.com/repos/{owner}/{repo}"
-                req = urllib.request.Request(repo_info_url, headers={
-                    'Accept': 'application/vnd.github+json',
-                    'Authorization': f'Bearer {gh_token}',
-                    'X-GitHub-Api-Version': '2022-11-28',
-                })
+              # ── Check if this is a fork ──────────────────────────────────────
+              repo_info_url = f"https://api.github.com/repos/{owner}/{repo}"
+              req = urllib.request.Request(repo_info_url, headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {gh_token}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
 
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        repo_info = json.loads(resp.read())
-                        is_fork = repo_info.get('fork', False)
-                        parent = repo_info.get('parent')
-                        source_repo = repo_info.get('source', {})
-                except urllib.error.HTTPError as e:
-                    print(f"  ✗ Could not fetch repository info (HTTP {e.code})")
-                    print(f"::error file={filepath}::Failed to fetch repository information")
-                    PERMISSION_ERRORS += 1
-                    continue
-                except Exception as e:
-                    print(f"  ✗ Error: {e}")
-                    print(f"::error file={filepath}::Failed to fetch repository information")
-                    PERMISSION_ERRORS += 1
-                    continue
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      repo_info = json.loads(resp.read())
+                      is_fork = repo_info.get('fork', False)
+                      parent = repo_info.get('parent')
+                      source_repo = repo_info.get('source', {})
+              except urllib.error.HTTPError as e:
+                  print(f"  ✗ Could not fetch repository info (HTTP {e.code})")
+                  print(f"::error file={filepath}::Failed to fetch repository information")
+                  PERMISSION_ERRORS += 1
+                  continue
+              except Exception as e:
+                  print(f"  ✗ Error: {e}")
+                  print(f"::error file={filepath}::Failed to fetch repository information")
+                  PERMISSION_ERRORS += 1
+                  continue
 
-                if is_fork and parent:
-                    parent_full_name = parent.get('full_name', '')
-                    print(f"  ⚠️  This is a fork of: {parent_full_name}")
-                    print(f"  Checking if original is already in registry...")
+              if is_fork and parent:
+                  parent_full_name = parent.get('full_name', '')
+                  print(f"  ⚠️  This is a fork of: {parent_full_name}")
+                  print(f"  Checking if original is already in registry...")
 
-                    # Check if original repo is in the index
-                    index_path = 'data/index.json'
-                    original_in_registry = False
-                    if os.path.exists(index_path):
-                        with open(index_path) as f:
-                            index = json.load(f)
-                            for entry in index:
-                                entry_id = entry.get('id', '')
-                                # Check both parent and source (for forks of forks)
-                                if entry_id == parent_full_name or (source_repo and entry_id == source_repo.get('full_name', '')):
-                                    original_in_registry = True
-                                    print(f"  ✗ Original repo '{entry_id}' is already in the registry")
-                                    print(f"::error file={filepath}::Fork submissions not allowed when original repository is in the registry")
-                                    print(f"  The plugin '{parent_full_name}' is already listed. Fork submissions are only")
-                                    print(f"  allowed when the original repository is not yet registered.")
-                                    PERMISSION_ERRORS += 1
-                                    break
+                  # Check if original repo is in the index
+                  index_path = 'data/index.json'
+                  original_in_registry = False
+                  if os.path.exists(index_path):
+                      with open(index_path) as f:
+                          index = json.load(f)
+                          for entry in index:
+                              entry_id = entry.get('id', '')
+                              # Check both parent and source (for forks of forks)
+                              if entry_id == parent_full_name or (source_repo and entry_id == source_repo.get('full_name', '')):
+                                  original_in_registry = True
+                                  print(f"  ✗ Original repo '{entry_id}' is already in the registry")
+                                  print(f"::error file={filepath}::Fork submissions not allowed when original repository is in the registry")
+                                  print(f"  The plugin '{parent_full_name}' is already listed. Fork submissions are only")
+                                  print(f"  allowed when the original repository is not yet registered.")
+                                  PERMISSION_ERRORS += 1
+                                  break
 
-                    if not original_in_registry:
-                        print(f"  ✓ Original not in registry - fork submission allowed")
-                        print(f"  Writing fork metadata...")
+                  if not original_in_registry:
+                      print(f"  ✓ Original not in registry - fork submission allowed")
+                      print(f"  Writing fork metadata...")
 
-                        # Add fork metadata to submission file
-                        data['fork'] = True
-                        data['forked_from'] = parent_full_name
-                        with open(filepath, 'w') as f:
-                            import yaml
-                            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-                        print(f"  Added fork: true, forked_from: {parent_full_name}")
+                      # Add fork metadata to submission file
+                      data['fork'] = True
+                      data['forked_from'] = parent_full_name
+                      with open(filepath, 'w') as f:
+                          import yaml
+                          yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+                      print(f"  Added fork: true, forked_from: {parent_full_name}")
 
-                elif owner == pr_author:
-                    print(f"  ✓ Author owns this repository")
-                    print(f"  → Permission check passed")
+              elif owner == pr_author:
+                  print(f"  ✓ Author owns this repository")
+                  print(f"  → Permission check passed")
 
-                    # Remove any fork metadata if present
-                    if data.get('fork'):
-                        del data['fork']
-                    if data.get('forked_from'):
-                        del data['forked_from']
-                    with open(filepath, 'w') as f:
-                        import yaml
-                        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+                  # Remove any fork metadata if present
+                  if data.get('fork'):
+                      del data['fork']
+                  if data.get('forked_from'):
+                      del data['forked_from']
+                  with open(filepath, 'w') as f:
+                      import yaml
+                      yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-                else:
-                    # ── Check: Is author a collaborator with push access? ─────────
-                    print(f"  Checking collaboration status...")
+              else:
+                  # ── Check: Is author a collaborator with push access? ─────────
+                  print(f"  Checking collaboration status...")
 
-                    collab_url = f"https://api.github.com/repos/{owner}/{repo}/collaborators/{pr_author}/permission"
-                    req = urllib.request.Request(collab_url, headers={
-                        'Accept': 'application/vnd.github+json',
-                        'Authorization': f'Bearer {gh_token}',
-                        'X-GitHub-Api-Version': '2022-11-28',
-                    })
+                  collab_url = f"https://api.github.com/repos/{owner}/{repo}/collaborators/{pr_author}/permission"
+                  req = urllib.request.Request(collab_url, headers={
+                      'Accept': 'application/vnd.github+json',
+                      'Authorization': f'Bearer {gh_token}',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  })
 
-                    try:
-                        with urllib.request.urlopen(req, timeout=30) as resp:
-                            perm_data = json.loads(resp.read())
-                            permission = perm_data.get('permission', '')
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          perm_data = json.loads(resp.read())
+                          permission = perm_data.get('permission', '')
 
-                            # push, maintain, or admin = can manage releases
-                            if permission in ['admin', 'push', 'maintain']:
-                                print(f"  ✓ Author has {permission} permission")
-                                print(f"  → Permission check passed")
-                            else:
-                                print(f"  ✗ Author has {permission} permission (insufficient)")
-                                print(f"::error file={filepath}::You do not have permission to submit this repository")
-                                print(f"  Only the repository owner or collaborators with push/maintain/admin access")
-                                print(f"  can submit a plugin. Your current permission: {permission}")
-                                PERMISSION_ERRORS += 1
+                          # push, maintain, or admin = can manage releases
+                          if permission in ['admin', 'push', 'maintain']:
+                              print(f"  ✓ Author has {permission} permission")
+                              print(f"  → Permission check passed")
+                          else:
+                              print(f"  ✗ Author has {permission} permission (insufficient)")
+                              print(f"::error file={filepath}::You do not have permission to submit this repository")
+                              print(f"  Only the repository owner or collaborators with push/maintain/admin access")
+                              print(f"  can submit a plugin. Your current permission: {permission}")
+                              PERMISSION_ERRORS += 1
 
-                    except urllib.error.HTTPError as e:
-                        if e.code == 404:
-                            print(f"  ✗ Author is not a collaborator on this repository")
-                            print(f"::error file={filepath}::You do not have permission to submit this repository")
-                            print(f"  Only the repository owner or collaborators with push/maintain/admin access")
-                            print(f"  can submit a plugin.")
-                            PERMISSION_ERRORS += 1
-                        elif e.code == 403:
-                            print(f"  ✗ Cannot verify permissions (API rate limit or access denied)")
-                            print(f"  ::warning file={filepath}::Could not verify collaboration status")
-                        else:
-                            print(f"  ✗ Error checking permission (HTTP {e.code})")
-                            print(f"::error file={filepath}::Failed to verify repository permissions")
-                            PERMISSION_ERRORS += 1
-                    except Exception as e:
-                        print(f"  ✗ Error: {e}")
-                        print(f"::error file={filepath}::Failed to verify repository permissions")
-                        PERMISSION_ERRORS += 1
+                  except urllib.error.HTTPError as e:
+                      if e.code == 404:
+                          print(f"  ✗ Author is not a collaborator on this repository")
+                          print(f"::error file={filepath}::You do not have permission to submit this repository")
+                          print(f"  Only the repository owner or collaborators with push/maintain/admin access")
+                          print(f"  can submit a plugin.")
+                          PERMISSION_ERRORS += 1
+                      elif e.code == 403:
+                          print(f"  ✗ Cannot verify permissions (API rate limit or access denied)")
+                          print(f"  ::warning file={filepath}::Could not verify collaboration status")
+                      else:
+                          print(f"  ✗ Error checking permission (HTTP {e.code})")
+                          print(f"::error file={filepath}::Failed to verify repository permissions")
+                          PERMISSION_ERRORS += 1
+                  except Exception as e:
+                      print(f"  ✗ Error: {e}")
+                      print(f"::error file={filepath}::Failed to verify repository permissions")
+                      PERMISSION_ERRORS += 1
 
-            print("\n" + "="*50)
-            if PERMISSION_ERRORS > 0:
-                print(f"Permission check failed: {PERMISSION_ERRORS} error(s)")
-                print("Only repository owners or collaborators can submit plugins.")
-                exit(1)
-            else:
-                print("All permission checks passed!")
-            PYEOF
+          print("\n" + "="*50)
+          if PERMISSION_ERRORS > 0:
+              print(f"Permission check failed: {PERMISSION_ERRORS} error(s)")
+              print("Only repository owners or collaborators can submit plugins.")
+              exit(1)
+          else:
+              print("All permission checks passed!")
+          PYEOF
 
       # ── Fetch plugin.yml from each repo ──────────────────────────────────
       - name: Fetch plugin.yml from repositories
         id: fetch-plugin-yml
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 << 'PYEOF'
-            import os
-            import re
-            import urllib.request
-            import json
+          import os
+          import re
+          import urllib.request
+          import json
 
-            files = os.environ.get('FILES', '').strip()
-            if not files:
-                print("No files to process")
-                exit(0)
+          files = os.environ.get('FILES', '').strip()
+          if not files:
+              print("No files to process")
+              exit(0)
 
-            for filepath in files.split('\n'):
-                filepath = filepath.strip()
-                if not filepath:
-                    continue
+          for filepath in files.split('\n'):
+              filepath = filepath.strip()
+              if not filepath:
+                  continue
 
-                print(f"\n{'='*50}")
-                print(f"Processing: {filepath}")
-                print('='*50)
+              print(f"\n{'='*50}")
+              print(f"Processing: {filepath}")
+              print('='*50)
 
-                try:
-                    import yaml
-                    with open(filepath) as f:
-                        data = yaml.safe_load(f) or {}
-                except Exception as e:
-                    print(f"::error file={filepath}::Failed to parse YAML: {e}")
-                    continue
+              try:
+                  import yaml
+                  with open(filepath) as f:
+                      data = yaml.safe_load(f) or {}
+              except Exception as e:
+                  print(f"::error file={filepath}::Failed to parse YAML: {e}")
+                  continue
 
-                repo_url = data.get('repo_url', '')
-                if not repo_url:
-                    continue
+              repo_url = data.get('repo_url', '')
+              if not repo_url:
+                  continue
 
-                parts = repo_url.replace('https://github.com/', '').split('/')
-                owner = parts[0]
-                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+              parts = repo_url.replace('https://github.com/', '').split('/')
+              owner = parts[0]
+              repo = parts[1].rstrip('/') if len(parts) > 1 else ''
 
-                print(f"Fetching plugin.yml from {owner}/{repo}...")
+              print(f"Fetching plugin.yml from {owner}/{repo}...")
 
-                # Fetch plugin.yml
-                url = f"https://api.github.com/repos/{owner}/{repo}/contents/plugin.yml"
-                req = urllib.request.Request(url, headers={
-                    'Accept': 'application/vnd.github+json',
-                    'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
-                    'X-GitHub-Api-Version': '2022-11-28',
-                })
+              # Fetch plugin.yml
+              url = f"https://api.github.com/repos/{owner}/{repo}/contents/plugin.yml"
+              req = urllib.request.Request(url, headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
 
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        import base64
-                        content_data = json.loads(resp.read())
-                        content = base64.b64decode(content_data['content']).decode('utf-8')
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      import base64
+                      content_data = json.loads(resp.read())
+                      content = base64.b64decode(content_data['content']).decode('utf-8')
 
-                        # Parse plugin.yml
-                        name = re.search(r'^name:\s*(.+)$', content, re.MULTILINE)
-                        version = re.search(r'^version:\s*(.+)$', content, re.MULTILINE)
+                      # Parse plugin.yml
+                      name = re.search(r'^name:\s*(.+)$', content, re.MULTILINE)
+                      version = re.search(r'^version:\s*(.+)$', content, re.MULTILINE)
 
-                        print(f"  plugin.yml found ✓")
-                        if name:
-                            print(f"  name: {name.group(1).strip()}")
-                        if version:
-                            print(f"  version: {version.group(1).strip()}")
-                except urllib.error.HTTPError as e:
-                    if e.code == 404:
-                        print(f"::error file={filepath}::plugin.yml not found in {owner}/{repo}")
-                    else:
-                        print(f"::error file={filepath}::Failed to fetch plugin.yml (HTTP {e.code})")
-                except Exception as e:
-                    print(f"::error file={filepath}::Error: {e}")
+                      print(f"  plugin.yml found ✓")
+                      if name:
+                          print(f"  name: {name.group(1).strip()}")
+                      if version:
+                          print(f"  version: {version.group(1).strip()}")
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      print(f"::error file={filepath}::plugin.yml not found in {owner}/{repo}")
+                  else:
+                      print(f"::error file={filepath}::Failed to fetch plugin.yml (HTTP {e.code})")
+              except Exception as e:
+                  print(f"::error file={filepath}::Error: {e}")
 
-            print("\n" + "="*50)
-            print("plugin.yml check complete")
-            print("="*50)
+          print("\n" + "="*50)
+          print("plugin.yml check complete")
+          print("="*50)
 
-            PYEOF
+          PYEOF
 
       # ── Check for stable release ─────────────────────────────────────────
       - name: Check stable releases
         id: check-releases
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 << 'PYEOF'
-            import os
-            import urllib.request
-            import json
+          import os
+          import urllib.request
+          import json
 
-            files = os.environ.get('FILES', '').strip()
-            if not files:
-                exit(0)
+          files = os.environ.get('FILES', '').strip()
+          if not files:
+              exit(0)
 
-            for filepath in files.split('\n'):
-                filepath = filepath.strip()
-                if not filepath:
-                    continue
+          for filepath in files.split('\n'):
+              filepath = filepath.strip()
+              if not filepath:
+                  continue
 
-                try:
-                    import yaml
-                    with open(filepath) as f:
-                        data = yaml.safe_load(f) or {}
-                except:
-                    continue
+              try:
+                  import yaml
+                  with open(filepath) as f:
+                      data = yaml.safe_load(f) or {}
+              except:
+                  continue
 
-                repo_url = data.get('repo_url', '')
-                if not repo_url:
-                    continue
+              repo_url = data.get('repo_url', '')
+              if not repo_url:
+                  continue
 
-                parts = repo_url.replace('https://github.com/', '').split('/')
-                owner = parts[0]
-                repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+              parts = repo_url.replace('https://github.com/', '').split('/')
+              owner = parts[0]
+              repo = parts[1].rstrip('/') if len(parts) > 1 else ''
 
-                print(f"Checking releases for {owner}/{repo}...")
+              print(f"Checking releases for {owner}/{repo}...")
 
-                # Check latest release
-                url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
-                req = urllib.request.Request(url, headers={
-                    'Accept': 'application/vnd.github+json',
-                    'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
-                    'X-GitHub-Api-Version': '2022-11-28',
-                })
+              # Check latest release
+              url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+              req = urllib.request.Request(url, headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {os.environ.get("GH_TOKEN", "")}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
 
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        release = json.loads(resp.read())
-                        tag = release.get('tag_name', 'unknown')
-                        assets = release.get('assets', [])
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      release = json.loads(resp.read())
+                      tag = release.get('tag_name', 'unknown')
+                      assets = release.get('assets', [])
 
-                        phar_found = False
-                        for asset in assets:
-                            if asset['name'].lower().endswith('.phar'):
-                                phar_found = True
-                                print(f"  Release: {tag} ✓")
-                                print(f"  .phar asset: {asset['name']} ✓")
-                                break
+                      phar_found = False
+                      for asset in assets:
+                          if asset['name'].lower().endswith('.phar'):
+                              phar_found = True
+                              print(f"  Release: {tag} ✓")
+                              print(f"  .phar asset: {asset['name']} ✓")
+                              break
 
-                        if not phar_found:
-                            print(f"::warning file={filepath}::No .phar asset found in latest release ({tag})")
-                            print(f"  A stable release with .phar is required for listing")
-                except urllib.error.HTTPError as e:
-                    if e.code == 404:
-                        print(f"::error file={filepath}::No stable release found in {owner}/{repo}")
-                        print(f"  Create a release with a .phar asset first")
-                    else:
-                        print(f"::warning::Failed to check releases (HTTP {e.code})")
-                except Exception as e:
-                    print(f"::warning::Error checking releases: {e}")
+                      if not phar_found:
+                          print(f"::warning file={filepath}::No .phar asset found in latest release ({tag})")
+                          print(f"  A stable release with .phar is required for listing")
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      print(f"::error file={filepath}::No stable release found in {owner}/{repo}")
+                      print(f"  Create a release with a .phar asset first")
+                  else:
+                      print(f"::warning::Failed to check releases (HTTP {e.code})")
+              except Exception as e:
+                  print(f"::warning::Error checking releases: {e}")
 
-            PYEOF
+          PYEOF
 
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Validation summary
+        if: steps.find-files.outputs.files != ''
         run: |
           echo ""
           echo "========================================"

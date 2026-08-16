@@ -143,16 +143,21 @@ Fields that MUST be read automatically (never ask the developer to re-enter thes
   "icon_path": null,
   "icon_url": "https://raw.githubusercontent.com/owner/repo/HEAD/assets/icon.png",
   "repo_url": "https://github.com/owner/repo",
-  "download_url": "https://github.com/owner/repo/releases/latest/download/Plugin.phar",
+  "download_url": "https://github.com/owner/repo/releases/download/v1.2.0/Plugin.phar",
   "download_count": 1234,
+  "download_total": 5678,
   "build_tier": "verified",
   "attestation_checked_at": "2026-08-12T00:00:00Z",
   "approved_at": "2026-08-01T00:00:00Z",
-  "last_synced_at": "2026-08-12T00:00:00Z"
+  "last_synced_at": "2026-08-12T00:00:00Z",
+  "all_tags": ["v1.2.0", "v1.1.0"],
+  "featured": false
 }
 ```
 
-`build_tier` is one of: `"verified"` (has SLSA attestation), `"built-via-ci"` (`.phar` uploaded by `github-actions[bot]`), `"unverified"` (manually uploaded), or `null` (unknown / release unavailable). `icon_path` is the developer-submitted path or `null`; `icon_url` uses `HEAD` in place of a branch name so GitHub resolves it server-side to the current default branch — no API call to look up the branch is needed. If neither the submitted path nor `assets/icon.png` resolves, the registry's own default icon (constant TBD) is used. `unavailable: true` may be set by the sync workflow when a repo or release becomes inaccessible rather than silently dropping the entry.
+`download_count` is the download count for the current approved stable version. `download_total` is the cumulative download count across all stable releases ever submitted. Frontend displays these as `{download_count}/{download_total}`.
+
+`build_tier` is one of: `"verified"` (has SLSA attestation), `"built-via-ci"` (`.phar` uploaded by `github-actions[bot]`), `"unverified"` (manually uploaded), or `null` (unknown / release unavailable). `icon_path` is the developer-submitted path or `null`; `icon_url` uses `HEAD` in place of a branch name so GitHub resolves it server-side to the current default branch — no API call to look up the branch is needed. If neither the submitted path nor `assets/icon.png` resolves, the registry's own default icon (constant TBD) is used. `unavailable: true` may be set by the sync workflow when a repo or release becomes inaccessible rather than silently dropping the entry. `all_tags` tracks all stable release tags that have been submitted (oldest last), used for cumulative download counting.
 
 ## 6. Security model (defense in depth — 6 layers)
 

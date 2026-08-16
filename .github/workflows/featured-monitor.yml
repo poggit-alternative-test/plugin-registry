@@ -1,11 +1,13 @@
 name: Featured Plugin Monitor
 
 # Monitors and manages featured plugins.
-# - When 'featured' label is added to a submission issue: sets featured: true
+# Submissions in this registry are PR-based (see validate-pr.yml / approve-pr.yml),
+# so featured status is tracked against the submission PR, not an issue.
+# - When 'featured' label is added to a submission PR: sets featured: true
 # - When 'featured' label is removed: sets featured: false
 # - Scheduled: enforces max 10 featured plugins
 on:
-  issues:
+  pull_request:
     types: [labeled, unlabeled]
   schedule:
     # Every hour at :30
@@ -15,15 +17,15 @@ on:
 # Permissions
 permissions:
   contents: write
-  issues: write
+  pull-requests: write
 
 jobs:
   # ── Handle label changes ────────────────────────────────────────────────
   handle-label:
     name: Handle featured label
     runs-on: ubuntu-latest
-    # Only run on issue events
-    if: github.event_name == 'issues'
+    # Only run on pull_request events
+    if: github.event_name == 'pull_request'
     outputs:
       action: ${{ steps.process.outputs.action }}
       plugin_id: ${{ steps.process.outputs.plugin_id }}
@@ -51,24 +53,24 @@ jobs:
         if: steps.check-label.outputs.is_featured_change != 'true'
         run: exit 0
 
-      # ── Find plugin by issue number ────────────────────────────────────
+      # ── Find plugin by submission PR number ─────────────────────────────
       - name: Find plugin
         id: find-plugin
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ISSUE_NUMBER=${{ github.event.issue.number }}
-
-          # Find entry with matching submission_issue_number
+          # Find entry with matching submission_pr_number
           RESULT=$(python3 << 'PYEOF'
           import json
           import os
 
-          issue_number = int(os.environ.get('ISSUE_NUMBER', '0'))
+          pr_number = int(os.environ.get('PR_NUMBER', '0'))
 
           with open('data/index.json') as f:
               index = json.load(f)
 
           for i, entry in enumerate(index):
-              if entry.get('submission_issue_number') == issue_number:
+              if entry.get('submission_pr_number') == pr_number:
                   print(f"found={entry['id']}")
                   print(f"index={i}")
                   print(f"featured={entry.get('featured', False)}")
@@ -76,6 +78,7 @@ jobs:
 
           print("found=none")
           PYEOF
+          )
 
           echo "$RESULT"
           echo "$RESULT" >> "$GITHUB_OUTPUT"
@@ -84,15 +87,15 @@ jobs:
       - name: Skip if not found
         if: steps.find-plugin.outputs.found == 'none'
         run: |
-          echo "No plugin found with submission_issue_number=${{ github.event.issue.number }}"
-          echo "This issue may not be linked to a plugin entry."
+          echo "No plugin found with submission_pr_number=${{ github.event.pull_request.number }}"
+          echo "This PR may not be linked to an approved plugin entry."
           exit 0
 
       # ── Update featured status ─────────────────────────────────────────
       - name: Update featured status
         id: process
         env:
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PLUGIN_ID: ${{ steps.find-plugin.outputs.found }}
           ACTION: ${{ github.event.action }}
         run: |
@@ -103,7 +106,7 @@ jobs:
           import os
           from datetime import datetime, timezone
 
-          issue_number = int(os.environ.get('ISSUE_NUMBER', '0'))
+          pr_number = int(os.environ.get('PR_NUMBER', '0'))
           plugin_id = os.environ.get('PLUGIN_ID', '')
           action = os.environ.get('ACTION', '')
 
@@ -233,9 +236,19 @@ jobs:
           print("\nDone")
           PYEOF
 
-      # ── Remove labels from issues ───────────────────────────────────
-      - name: Remove labels from issues
-        if: steps.enforce.outputs.removed != ''
+          # Expose the removed-plugins list as a step output so the next
+          # step can decide whether to run. /tmp/removed.json only exists
+          # when plugins were actually unfeatured (the script exits early
+          # otherwise), so default to an empty array.
+          if [ -f /tmp/removed.json ]; then
+            echo "removed=$(cat /tmp/removed.json)" >> "$GITHUB_OUTPUT"
+          else
+            echo "removed=[]" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Remove labels from PRs ──────────────────────────────────────────
+      - name: Remove labels from PRs
+        if: steps.enforce.outputs.removed != '[]'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -251,21 +264,22 @@ jobs:
           repo = os.environ.get('REPO', '')
           token = os.environ.get('GH_TOKEN', '')
 
-          print(f"Removing 'featured' label from {len(removed)} issue(s)...")
+          print(f"Removing 'featured' label from {len(removed)} PR(s)...")
 
-          # Load index to find issue numbers
+          # Load index to find submission PR numbers
           with open('data/index.json') as f:
               index = json.load(f)
 
           for plugin_id in removed:
               for entry in index:
                   if entry.get('id') == plugin_id:
-                      issue_num = entry.get('submission_issue_number')
-                      if issue_num:
-                          print(f"  Removing label from issue #{issue_num} ({plugin_id})")
-                          # Use gh CLI to remove label
+                      pr_num = entry.get('submission_pr_number')
+                      if pr_num:
+                          print(f"  Removing label from PR #{pr_num} ({plugin_id})")
+                          # PRs are issues under the GitHub REST API, so the
+                          # issues/{number}/labels endpoint works for PR numbers too.
                           result = subprocess.run(
-                              ['gh', 'api', f'repos/{repo}/issues/{issue_num}/labels/featured',
+                              ['gh', 'api', f'repos/{repo}/issues/{pr_num}/labels/featured',
                               '--method', 'DELETE',
                               '--silent'],
                               capture_output=True

@@ -129,8 +129,10 @@ jobs:
           def refresh_entry(entry):
               """Refresh a single entry. Returns updated (entry, did_change, reason).
 
-              NOTE: all_tags and dev_build are NEVER modified by the sync workflow.
-              They are managed by the approval workflow only.
+              - download_count: updated for current approved version
+              - download_total: updated as cumulative sum across all stable releases
+              - download_url, build_tier: NOT updated (reflect version at approval time)
+              - all_tags, dev_build: managed by approval workflow only
               """
               plugin_id = entry.get('id', '')
               if '/' not in plugin_id:
@@ -172,6 +174,20 @@ jobs:
               new_download_count = phar_asset.get('download_count', 0)
               phar_url = phar_asset['browser_download_url']
 
+              # ── Fetch all releases for download_total ───────────────────────
+              # Sum downloads across all stable releases (non-prerelease)
+              # We use /releases (not /releases/latest) to get ALL releases
+              _, all_releases = gh_api_json(f'/repos/{owner}/{repo}/releases')
+              new_download_total = 0
+              if all_releases:
+                  for rel in all_releases:
+                      # Only count stable (non-prerelease) releases
+                      if not rel.get('prerelease', False):
+                          for asset in rel.get('assets', []):
+                              if asset['name'].lower().endswith('.phar'):
+                                  new_download_total += asset.get('download_count', 0)
+                                  break  # only count .phar per release
+
               # ── Determine build_tier (stable only) ─────────────────────
               build_tier = None
               checked_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -210,14 +226,15 @@ jobs:
                   owner, repo, entry.get('icon_path'))
 
               # ── Detect changes ─────────────────────────────────────────
-              # NOTE: all_tags and dev_build are intentionally excluded from
-              # the change detection — they are managed by the approval workflow.
+              # download_count is updated to reflect current approved version's downloads
+              # download_total is updated to reflect cumulative downloads across all stable releases
+              # download_url and build_tier are intentionally NOT updated — they reflect the
+              # version that was approved; new versions require new submissions.
               did_change = (
                   entry.get('tag') != new_tag
                   or entry.get('version') != new_version
-                  or entry.get('download_url') != new_download_url
                   or entry.get('download_count') != new_download_count
-                  or entry.get('build_tier') != build_tier
+                  or entry.get('download_total') != new_download_total
                   or entry.get('icon_url') != new_icon_url
                   or entry.get('stargazers_count') != new_stars
                   or entry.get('unavailable', False) is True  # was previously unavailable
@@ -225,9 +242,9 @@ jobs:
 
               entry['tag'] = new_tag
               entry['version'] = new_version
-              entry['download_url'] = new_download_url
               entry['download_count'] = new_download_count
-              entry['build_tier'] = build_tier
+              entry['download_total'] = new_download_total
+              # download_url and build_tier are intentionally NOT updated
               entry['attestation_checked_at'] = checked_at
               entry['icon_path'] = new_icon_path
               entry['icon_url'] = new_icon_url
@@ -235,13 +252,11 @@ jobs:
               entry['unavailable'] = False
               entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-              # all_tags and dev_build are preserved exactly as-is — never modified by sync.
-              # featured, featured_marked_at, submission_pr_number, keywords are also preserved.
+              # Ensure fields exist (for older entries)
               if 'all_tags' not in entry:
                   entry['all_tags'] = []
               if 'dev_build' not in entry:
                   entry['dev_build'] = None
-              # Ensure featured fields exist (for older entries)
               if 'featured' not in entry:
                   entry['featured'] = False
               if 'featured_marked_at' not in entry:
@@ -250,6 +265,9 @@ jobs:
                   entry['submission_pr_number'] = None
               if 'keywords' not in entry:
                   entry['keywords'] = []
+              if 'download_total' not in entry:
+                  # For older entries without download_total, initialize with download_count
+                  entry['download_total'] = entry.get('download_count', 0)
 
               return entry, did_change, 'updated' if did_change else 'unchanged'
 
