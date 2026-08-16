@@ -85,10 +85,12 @@ jobs:
         run: |
           echo "Merging PR #$PR_NUMBER..."
 
-          # Use gh CLI to merge the PR with admin privileges and auto-merge
+          # Use gh CLI to merge the PR with admin privileges
+          # --admin: force merge using admin privileges (bypass requirements)
+          # --delete-branch: delete the PR branch after merge
+          # --merge: standard merge commit
           gh pr merge $PR_NUMBER \
             --admin \
-            --auto \
             --delete-branch \
             --merge
 
