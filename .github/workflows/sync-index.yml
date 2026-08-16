@@ -3,7 +3,7 @@ name: Sync Plugin Index
 # Keeps all approved plugin entries fresh without requiring resubmission.
 #
 # - Refreshes: tag, version, download_url, download_count, build_tier,
-#   attestation_checked_at, last_synced_at
+#   stargazers_count, attestation_checked_at, last_synced_at
 # - Re-resolves icon_url per four-tier fallback (may change if the submitter
 #   uploaded assets/ after approval): submitted icon_path → icon.png →
 #   assets/icon.png → null (frontend uses default)
@@ -129,15 +129,18 @@ jobs:
           def refresh_entry(entry):
               """Refresh a single entry. Returns updated (entry, did_change, reason).
 
-              NOTE: all_tags is NEVER modified by the sync workflow. It is only
-              set or updated by the approval workflow. dev_build is also
-              managed by the approval workflow only.
+              NOTE: all_tags and dev_build are NEVER modified by the sync workflow.
+              They are managed by the approval workflow only.
               """
               plugin_id = entry.get('id', '')
               if '/' not in plugin_id:
                   return entry, False, 'invalid_id'
 
               owner, repo = plugin_id.split('/', 1)
+
+              # ── Fetch /repos/{owner}/{repo} for stargazers_count ────────────
+              _, repo_data = gh_api_json(f'/repos/{owner}/{repo}')
+              new_stars = repo_data.get('stargazers_count', 0) if repo_data else 0
 
               # ── Fetch /releases/latest (stable release) ────────────────────
               status, release = gh_api_json(f'/repos/{owner}/{repo}/releases/latest')
@@ -216,6 +219,7 @@ jobs:
                   or entry.get('download_count') != new_download_count
                   or entry.get('build_tier') != build_tier
                   or entry.get('icon_url') != new_icon_url
+                  or entry.get('stargazers_count') != new_stars
                   or entry.get('unavailable', False) is True  # was previously unavailable
               )
 
@@ -227,6 +231,7 @@ jobs:
               entry['attestation_checked_at'] = checked_at
               entry['icon_path'] = new_icon_path
               entry['icon_url'] = new_icon_url
+              entry['stargazers_count'] = new_stars
               entry['unavailable'] = False
               entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 

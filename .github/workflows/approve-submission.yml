@@ -42,6 +42,7 @@ jobs:
       download_url: ${{ steps.stable-release.outputs.stable_download_url }}
       download_count: ${{ steps.stable-release.outputs.stable_download_count }}
       stable_asset_id: ${{ steps.stable-release.outputs.stable_asset_id }}
+      stargazers_count: ${{ steps.repo-info.outputs.stargazers_count }}
       # Nightly build
       nightly_found: ${{ steps.nightly-release.outputs.nightly_found }}
       nightly_tag: ${{ steps.nightly-release.outputs.nightly_tag }}
@@ -213,6 +214,19 @@ jobs:
           echo "plugin_api=$API_FIELD" >> "$GITHUB_OUTPUT"
           echo "plugin_author=$AUTHOR_LIST" >> "$GITHUB_OUTPUT"
           echo "plugin_description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
+
+      # ── Fetch repo info for stargazers_count ────────────────────────────────
+      - name: Fetch repo info for star count
+        id: repo-info
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+        run: |
+          STARS=$(curl -sL \
+            "https://api.github.com/repos/${OWNER}/${REPO}" \
+            -H "Accept: application/vnd.github+json" \
+            | python3 -c "import sys, json; print(json.load(sys.stdin).get('stargazers_count', 0))" 2>/dev/null || echo "0")
+          echo "stargazers_count=$STARS" >> "$GITHUB_OUTPUT"
 
       # ── Check stable release ────────────────────────────────────────────────
       - name: Check stable release
@@ -541,6 +555,7 @@ jobs:
           # Build tier (only from stable)
           BUILD_TIER: ${{ needs.validate.outputs.build_tier }}
           ATTESTATION_CHECKED_AT: ${{ needs.validate.outputs.attestation_checked_at }}
+          STARGAZERS_COUNT: ${{ needs.validate.outputs.stargazers_count }}
           AUTHOR_LIST: ${{ steps.author.outputs.author_list }}
         run: |
           python3 << 'PYEOF'
@@ -606,6 +621,10 @@ jobs:
           nightly_tag = env('NIGHTLY_TAG').strip()
           nightly_dl_url = env('NIGHTLY_DL_URL').strip()
 
+          # Stargazers count
+          stars_raw = env('STARGAZERS_COUNT').strip()
+          stargazers_count = int(stars_raw) if stars_raw.isdigit() else 0
+
           # version is tag stripped of leading 'v'
           version = release_tag.lstrip('v') if release_tag else ''
 
@@ -632,6 +651,9 @@ jobs:
                   entry['download_url'] = download_url
                   entry['build_tier'] = build_tier
                   entry['attestation_checked_at'] = checked_at
+
+              # Always update stars count
+              entry['stargazers_count'] = stargazers_count
 
                   # Append stable tag to all_tags (newest first) if not present
                   if release_tag not in entry.get('all_tags', []):
@@ -674,6 +696,7 @@ jobs:
                   'repo_url': env('REPO_URL'),
                   'download_url': download_url,
                   'download_count': download_count,
+                  'stargazers_count': stargazers_count,
                   'build_tier': build_tier,
                   'attestation_checked_at': checked_at,
                   'approved_at': now,

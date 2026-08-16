@@ -116,6 +116,12 @@
       "description": "Total GitHub Release asset download count, fetched on every sync. Null if the asset or release data is unavailable."
     },
 
+    "stargazers_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "GitHub repository star count, fetched on every sync."
+    },
+
     "build_tier": {
       "type": "string",
       "enum": ["verified", "built-via-ci", "unverified", null],
