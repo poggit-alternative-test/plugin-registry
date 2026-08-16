@@ -254,6 +254,7 @@ jobs:
                   version = release_tag.lstrip('v') if release_tag else version_raw
                   download_url = ''
                   download_count = 0
+                  download_total = 0
                   phar_found = False
 
                   for asset in release.get('assets', []):
@@ -268,6 +269,22 @@ jobs:
                   if not phar_found:
                       errors.append(f"{filepath}: No .phar found in latest release")
                       continue
+
+                  # Calculate total downloads across all stable releases
+                  try:
+                      all_releases = gh_api(f"/repos/{owner}/{repo}/releases")
+                      for rel in all_releases:
+                          # Only count stable (non-prerelease) releases
+                          if not rel.get('prerelease', False):
+                              for asset in rel.get('assets', []):
+                                  if asset['name'].lower().endswith('.phar'):
+                                      download_total += asset.get('download_count', 0)
+                                      break  # only count .phar per release
+                      print(f"  download_total: {download_total}")
+                  except Exception as e:
+                      # If we can't fetch all releases, just use current download_count
+                      download_total = download_count
+                      print(f"  download_total: {download_total} (current release only)")
 
               except Exception as e:
                   errors.append(f"{filepath}: Failed to fetch release - {e}")
@@ -344,6 +361,7 @@ jobs:
                   entry['description'] = description
                   entry['download_url'] = download_url
                   entry['download_count'] = download_count
+                  entry['download_total'] = download_total
                   entry['stargazers_count'] = stargazers_count
                   entry['icon_path'] = icon_path
                   entry['icon_url'] = icon_url
@@ -378,6 +396,7 @@ jobs:
                       'repo_url': repo_url,
                       'download_url': download_url,
                       'download_count': download_count,
+                      'download_total': download_total,
                       'stargazers_count': stargazers_count,
                       'build_tier': build_tier,
                       'attestation_checked_at': checked_at,
