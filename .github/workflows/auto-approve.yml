@@ -109,10 +109,10 @@ jobs:
               mergeable = pr.get('mergeable', False)
               print(f"PR mergeable: {mergeable}")
 
-          # Merge using GitHub API
+          # Merge using GitHub API - squash merge
           merge_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
           merge_data = json.dumps({
-              "merge_method": "merge",  # "merge", "squash", or "rebase"
+              "merge_method": "squash",  # "merge", "squash", or "rebase"
               "delete_branch": True
           }).encode('utf-8')
 

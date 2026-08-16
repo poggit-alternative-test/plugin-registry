@@ -1,10 +1,15 @@
 name: Approve Plugin Submission
 
-# Triggered when PR is merged (closed with 'approved' label).
+# Triggered when:
+# 1. PR is merged (closed with 'approved' label)
+# 2. auto-approve workflow completes (after merging PR)
 # Validates, generates full entry, and updates index.json.
 on:
   pull_request:
     types: [closed]
+  workflow_run:
+    types: [completed]
+    workflows: ["Auto Approve Plugin Submission"]
 
 # Permissions granted only when actually needed
 permissions:
@@ -15,10 +20,79 @@ jobs:
   approve:
     name: Approve submission
     runs-on: ubuntu-latest
-    # Only run on merge, and only if approved label was present
-    if: github.event.pull_request.merged == true
 
     steps:
+      # ── Determine trigger source and get PR number ───────────────────────────
+      - name: Determine trigger context
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            # Triggered by workflow_run (auto-approve completed)
+            # Get PR info from workflow run event
+            python3 << 'PYEOF'
+            import json
+            import urllib.request
+            import os
+
+            gh_token = os.environ.get('GH_TOKEN', '')
+            repo = os.environ.get('GITHUB_REPOSITORY', '')
+
+            # Get workflow run ID from event
+            workflow_run_id = os.environ.get('GITHUB_EVENT_PATH', '')
+            with open(workflow_run_id) as f:
+                event = json.load(f)
+
+            workflow_run_data = event.get('workflow_run', {})
+            workflow_id = workflow_run_data.get('id')
+
+            # Get workflow run details to find PR number
+            url = f"https://api.github.com/repos/{repo}/actions/runs/{workflow_id}"
+            req = urllib.request.Request(url, headers={
+                'Accept': 'application/vnd.github+json',
+                'Authorization': f'Bearer {gh_token}',
+                'X-GitHub-Api-Version': '2022-11-28',
+            })
+
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                run_data = json.loads(resp.read())
+
+            # Get PR number from event
+            pr_number = None
+            pull_requests = run_data.get('pull_requests', [])
+            if pull_requests:
+                pr_number = pull_requests[0].get('number')
+
+            # Get base branch
+            base_branch = None
+            if pull_requests:
+                base_branch = pull_requests[0].get('base', {}).get('ref')
+
+            print(f"PR_NUMBER={pr_number}")
+            print(f"BASE_BRANCH={base_branch}")
+
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"triggered_by=workflow_run\n")
+                f.write(f"pr_number={pr_number}\n")
+                f.write(f"base_branch={base_branch}\n")
+            PYEOF
+
+          elif [ "${{ github.event.pull_request.merged }}" == "true" ]; then
+            # Triggered by PR merge
+            echo "triggered_by=pull_request" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "base_branch=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
+          else
+            # Not a merge, skip
+            echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+            echo "Skipping: not a merge event"
+            exit 0
+          fi
+
+      # ── Skip if not a merge ─────────────────────────────────────────────
+      - name: Skip if not merged
+        if: steps.trigger.outputs.triggered_by == 'skip'
+        run: exit 0
+
       # ── Checkout merged code ──────────────────────────────────────────────
       # Explicitly checkout the base branch (e.g. main) rather than relying on
       # the default merge-preview ref (refs/pull/N/merge), which GitHub tears
@@ -27,14 +101,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ steps.trigger.outputs.base_branch }}
 
       # ── Find submission files (NEWLY ADDED only) ─────────────────────────────
       - name: Find submission files
         id: find-files
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.trigger.outputs.pr_number }}
         run: |
           # Use GitHub API to list files changed in this PR.
           # At merge time we are on the base branch (already merged), so git diff
@@ -110,7 +184,7 @@ jobs:
         id: process
         env:
           FILES: ${{ steps.find-files.outputs.files }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.trigger.outputs.pr_number }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
@@ -461,7 +535,7 @@ jobs:
 
           git commit -m "chore: approve plugin submission
 
-          Approved via PR #${{ github.event.pull_request.number }}
+          Approved via PR #${{ steps.trigger.outputs.pr_number }}
           Co-Authored-By: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
           git push
@@ -525,7 +599,7 @@ jobs:
           echo "Approval Complete"
           echo "========================================"
           echo ""
-          echo "PR #${{ github.event.pull_request.number }} has been approved."
+          echo "PR #${{ steps.trigger.outputs.pr_number }} has been approved."
           echo ""
           echo "The plugin has been added/updated in data/index.json"
           echo "and the submission files have been removed."
