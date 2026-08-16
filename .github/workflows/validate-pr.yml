@@ -26,7 +26,7 @@ jobs:
         id: find-files
         run: |
           # Find all YAML files in submissions/ folder
-          FILES=$(find submissions -name "*.yaml" -o -find submissions -name "*.yml" 2>/dev/null | sort)
+          FILES=$(find submissions -name "*.yaml" -o -name "*.yml" 2>/dev/null | sort)
 
           if [ -z "$FILES" ]; then
             echo "No submission files found in submissions/ folder"
@@ -39,22 +39,24 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$FILES" | wc -l)" >> "$GITHUB_OUTPUT"
 
-      # ── Check for submission files ────────────────────────────────────────
-      - name: Check for submission files
+      # ── Skip if no submission files (not a plugin submission PR) ──────────
+      - name: Not a plugin submission
         if: steps.find-files.outputs.files == ''
         run: |
-          echo "::error::No submission files found in submissions/ folder"
+          echo "This PR does not contain a plugin submission."
+          echo "Skipping validation - this is not a plugin submission PR."
           echo ""
-          echo "To submit a plugin, create a YAML file in the submissions/ folder."
+          echo "To submit a plugin, add a YAML file to the submissions/ folder."
           echo "Example: submissions/owner-repo.yaml"
-          exit 1
+        # Exit 0 = success, just skip the rest
 
       # ── Enforce one plugin per PR ────────────────────────────────────────
       - name: Enforce one plugin per PR
+        if: steps.find-files.outputs.files != ''
         run: |
           COUNT=$(echo "${{ steps.find-files.outputs.files }}" | wc -l)
           if [ "$COUNT" -gt 1 ]; then
-            echo "::error::Multiple submission files detected: ${{ steps.find-files.outputs.files }}"
+            echo "::error::Multiple submission files detected"
             echo ""
             echo "Error: Only ONE plugin submission per PR is allowed."
             echo "Please create separate PRs for each plugin."
@@ -66,8 +68,10 @@ jobs:
           echo "✓ Exactly one submission file found"
 
       # ── Validate each submission file ──────────────────────────────────────
+      # Only run if submission files exist
       - name: Validate submission files
         id: validate
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
         run: |
@@ -177,6 +181,7 @@ jobs:
       # ── Security: Verify user has permission to the submitted repo ───────────
       - name: Verify repository permissions
         id: check-permissions
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
@@ -361,6 +366,7 @@ jobs:
       # ── Fetch plugin.yml from each repo ──────────────────────────────────
       - name: Fetch plugin.yml from repositories
         id: fetch-plugin-yml
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
@@ -443,6 +449,7 @@ jobs:
       # ── Check for stable release ─────────────────────────────────────────
       - name: Check stable releases
         id: check-releases
+        if: steps.find-files.outputs.files != ''
         env:
           FILES: ${{ steps.find-files.outputs.files }}
           GH_TOKEN: ${{ github.token }}
@@ -516,6 +523,7 @@ jobs:
 
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Validation summary
+        if: steps.find-files.outputs.files != ''
         run: |
           echo ""
           echo "========================================"
