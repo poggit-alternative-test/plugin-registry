@@ -25,6 +25,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # ── Fetch base branch for diff comparison ─────────────────────────────
+      # Needed for git diff to work correctly — checkout only fetches PR branch.
+      - name: Fetch base branch
+        run: |
+          BASE_BRANCH="${{ github.base_ref }}"
+          echo "Fetching base branch: $BASE_BRANCH"
+          git fetch origin "$BASE_BRANCH" --depth=1 || true
 
       # ── Find submission files (NEWLY ADDED only) ─────────────────────────────
       - name: Find submission files
