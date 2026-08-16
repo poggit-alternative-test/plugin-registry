@@ -8,6 +8,18 @@ Thank you for your interest in adding a plugin to the Axolotl registry!
 
 All plugins must be submitted via Pull Request. This keeps the registry clean and allows automated validation.
 
+### ⚠️ One Plugin Per PR
+
+**Only ONE plugin per PR is allowed.** Each plugin must have its own separate Pull Request.
+
+```
+✅ Correct:
+  PR #1: submissions/my-plugin.yaml       → 1 plugin
+
+❌ Wrong:
+  PR #1: submissions/plugin-a.yaml + plugin-b.yaml + plugin-c.yaml  → 3 plugins
+```
+
 ### Prerequisites
 
 Your plugin repository must:
@@ -92,11 +104,16 @@ Your plugin repository must:
 
 ## Updating your plugin
 
-When you release a new version:
+When you release a new version, create a **new PR** with your submission file.
 
-1. Open a **new PR** with your submission file again
-2. The workflow detects it's an update
-3. Your entry is updated with the new version
+```
+1. Create a new submission file: submissions/my-plugin.yaml
+2. Open a new Pull Request
+3. Wait for validation and approval
+4. Your entry is updated with the new version
+```
+
+Each version update requires its own PR.
 
 ---
 

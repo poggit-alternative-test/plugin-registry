@@ -39,7 +39,7 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$FILES" | wc -l)" >> "$GITHUB_OUTPUT"
 
-      # ── Fail if no files ─────────────────────────────────────────────────
+      # ── Check for submission files ────────────────────────────────────────
       - name: Check for submission files
         if: steps.find-files.outputs.files == ''
         run: |
@@ -48,6 +48,22 @@ jobs:
           echo "To submit a plugin, create a YAML file in the submissions/ folder."
           echo "Example: submissions/owner-repo.yaml"
           exit 1
+
+      # ── Enforce one plugin per PR ────────────────────────────────────────
+      - name: Enforce one plugin per PR
+        run: |
+          COUNT=$(echo "${{ steps.find-files.outputs.files }}" | wc -l)
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::Multiple submission files detected: ${{ steps.find-files.outputs.files }}"
+            echo ""
+            echo "Error: Only ONE plugin submission per PR is allowed."
+            echo "Please create separate PRs for each plugin."
+            echo ""
+            echo "Found $COUNT files:"
+            echo "${{ steps.find-files.outputs.files }}"
+            exit 1
+          fi
+          echo "✓ Exactly one submission file found"
 
       # ── Validate each submission file ──────────────────────────────────────
       - name: Validate submission files

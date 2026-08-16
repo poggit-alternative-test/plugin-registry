@@ -39,12 +39,25 @@ jobs:
           echo "$FILES"
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
 
-      # ── Fail if no files ─────────────────────────────────────────────────
+      # ── Check for submission files ────────────────────────────────────────
       - name: Check for submission files
         if: steps.find-files.outputs.files == ''
         run: |
           echo "No submission files to process. This PR may not be a plugin submission."
           exit 0
+
+      # ── Enforce one plugin per PR ────────────────────────────────────────
+      - name: Enforce one plugin per PR
+        run: |
+          COUNT=$(echo "${{ steps.find-files.outputs.files }}" | wc -l)
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::Multiple submission files detected"
+            echo ""
+            echo "Error: Only ONE plugin submission per PR is allowed."
+            echo "Each plugin must be submitted via its own PR."
+            exit 1
+          fi
+          echo "✓ Single submission file confirmed"
 
       # ── Process each submission file ──────────────────────────────────────
       - name: Process submissions
