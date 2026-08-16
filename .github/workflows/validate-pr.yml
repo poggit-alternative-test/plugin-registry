@@ -36,7 +36,7 @@ jobs:
           # Use GitHub API to list files changed in this PR.
           # This is more reliable than git diff because it works regardless of
           # branch fetch state and merge conflicts.
-          ADDED_FILES=$(python3 << 'PYEOF'
+          python3 << 'PYEOF'
           import urllib.request
           import json
           import os
@@ -63,15 +63,15 @@ jobs:
                           filename = f['filename']
                           if filename.endswith('.yaml') or filename.endswith('.yml'):
                               added.append(filename)
-                              print(f"Found added file: {filename}", flush=True)
-                  print(f"Total added submission files: {len(added)}", flush=True)
+                  # Only print the actual result to stdout (for the shell to capture)
                   print('\n'.join(sorted(added)))
           except Exception as e:
-              print(f"Error fetching PR files: {e}", file=__import__('sys').stderr)
+              print(f"::error::Failed to fetch PR files: {e}", file=__import__('sys').stderr)
               exit(1)
 
           PYEOF
-          )
+
+          ADDED_FILES=$(cat)
 
           if [ -z "$ADDED_FILES" ]; then
             echo "No new submission files added in this PR"
