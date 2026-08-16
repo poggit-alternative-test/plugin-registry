@@ -2,38 +2,27 @@
 
 Thank you for your interest in adding a plugin to the Axolotl registry!
 
-This document explains the two ways to submit a plugin and what happens
-after you submit.
-
 ---
 
-## Submission paths
+## Submission via Pull Request (required)
 
-### 1. Via the registry site (recommended)
+All plugins must be submitted via Pull Request to this repository.
 
-If you have [GitHub Actions CI][pmmp-plugin-actions] set up for your plugin
-repo, the fastest path is to use the submission form on the registry site.
+### Prerequisites
 
-The site will:
-1. Help you pick your repository from GitHub.
-2. Verify your repo has a Release with a `.phar` asset.
-3. Ask you to choose a category and (optionally) provide an icon path.
-4. Open a structured Issue in this repository on your behalf.
+Your plugin repository must:
+- Be **public** on GitHub
+- Have a valid **`plugin.yml`** in the repository root
+- Have at least one **GitHub Release** with a **`.phar`** file (built any way you prefer)
 
-**You do not need to interact with this repository directly.**
+> ⚠️ The registry does **not** build anything on your behalf. Your `.phar` must already exist in a Release.
 
-### 2. Via the Issue Form (manual fallback)
+### Steps
 
-If you cannot set up CI yet, you can still submit manually by opening a new
-Issue on this repository and selecting the **"Submit a Plugin"** template.
-
-> ⚠️ **Important:** Your repository **must** have at least one GitHub Release
-> containing a `.phar` file, regardless of how it was built (manual upload,
-> custom CI, or `pmmp-plugin-actions`). The registry does not build anything
-> on your behalf.
-
-For the fastest path to getting CI set up, see
-[axolotl-pm/pmmp-plugin-actions][pmmp-plugin-actions].
+1. **Fork** this repository
+2. **Add your plugin** to `data/index.json` (see format below)
+3. **Open a Pull Request**
+4. Wait for automated validation and maintainer review
 
 ---
 
@@ -41,123 +30,102 @@ For the fastest path to getting CI set up, see
 
 Every submission goes through the same review pipeline:
 
-1. **Automated validation** — A GitHub Actions workflow runs a set of
-   read-only checks on your repository:
-   - Parses your `plugin.yml` via the GitHub Contents API.
-   - Confirms a Release with a `.phar` asset exists.
-   - Checks for an SLSA attestation (if your CI uses `pmmp-plugin-actions`
-     with `attest: true`).
-   The workflow posts a comment on your Issue with the results.
+1. **Automated validation** — A GitHub Actions workflow runs read-only checks:
+   - Parses your `plugin.yml` via the GitHub Contents API
+   - Confirms a Release with a `.phar` asset exists
+   - Checks for SLSA attestation (if built with `pmmp-plugin-actions` + `attest: true`)
+   The workflow posts the results as a PR comment.
 
-2. **Maintainer review** — A human maintainer reads your Issue, reviews
-   the plugin, and decides whether to approve it.
+2. **Maintainer review** — A human reviews your PR and decides whether to merge.
 
-3. **Approval** — If approved, a maintainer adds the `approved` label.
-   Your plugin is then added to `data/index.json` and appears on the site.
+3. **Merge** — Your plugin is added to the index and appears on the site.
 
-4. **Periodic sync** — Every few hours, a scheduled workflow refreshes
-   data for all approved plugins (latest version, download counts,
-   attestation status). You don't need to resubmit for updates.
+4. **Periodic sync** — Every few hours, data is refreshed automatically (latest version, download counts, attestation status).
 
 ---
 
-## Issue body format
+## Plugin entry format
 
-> **For developers building automated submission tools (Phase 7 integrators):**
->
-> When submitting via the GitHub API (`POST /repos/{owner}/{repo}/issues`),
-> construct the issue body as plain markdown using the format below.
-> The validation workflow parses this format — it does not process the
-> Issue Form YAML schema (which is only used by the manual fallback path).
->
-> **⚠ plugin.yml-derived fields are for reviewer reference only.**
-> The validation workflow **always re-fetches `plugin.yml`** from `repo_url`
-> via the Contents API as the source of truth. It does **not** trust the
-> copy of these fields that you put in the issue body. Do not try to
-> override or omit fields — they will be overwritten on validation.
+Add an entry to `data/index.json` with this structure:
 
-```
-## Required
-
-**Repository URL:** https://github.com/owner/plugin-name
-
-**Category:** economy
-
-**Icon Path:** assets/icon.png
-```
-_(leave blank to use `assets/icon.png` from your repo automatically,
- if it exists. If neither is available, the registry's default icon
- is used instead.)_
-
----
-
-## plugin.yml reference
-
-> The fields below are copied from your `plugin.yml` for reviewer
-> convenience. They are **re-verified from the repository** automatically
-> and cannot be used to override anything.
-
-**Name:**
-**Version:**
-**API:**
-**Author:**
-**Description:**
-
-**Dependencies:**
+```json
+{
+  "id": "owner/repo-name",
+  "name": "PluginName",
+  "version": "1.0.0",
+  "api": ["5.0.0"],
+  "author": ["username"],
+  "description": "A short description of what this plugin does.",
+  "category": "economy",
+  "icon_path": null,
+  "icon_url": "https://raw.githubusercontent.com/owner/repo/HEAD/assets/icon.png",
+  "repo_url": "https://github.com/owner/repo",
+  "download_url": "https://github.com/owner/repo/releases/latest/download/Plugin.phar",
+  "download_count": 0,
+  "build_tier": null,
+  "attestation_checked_at": null,
+  "approved_at": null,
+  "last_synced_at": null
+}
 ```
 
+### Fields explained
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | `owner/repo-name` (same as GitHub repo) |
+| `name` | Yes | Plugin display name (from `plugin.yml`) |
+| `version` | Yes | Latest version (from latest Release) |
+| `api` | Yes | Supported API versions (from `plugin.yml`) |
+| `author` | Yes | Array of author names/IDs |
+| `description` | Yes | Short description (from `plugin.yml`) |
+| `category` | Yes | One of the accepted categories (see below) |
+| `icon_path` | No | Path to icon in repo (e.g. `assets/icon.png`), or `null` |
+| `icon_url` | Auto | Auto-generated from `icon_path` or `assets/icon.png` |
+| `repo_url` | Yes | Full GitHub URL |
+| `download_url` | Yes | URL to the `.phar` in latest Release |
+| `download_count` | Auto | Updated by sync workflow |
+| `build_tier` | Auto | `verified`, `built-via-ci`, `unverified`, or `null` |
+| `attestation_checked_at` | Auto | Updated by sync workflow |
+| `approved_at` | Auto | Set by maintainer |
+| `last_synced_at` | Auto | Updated by sync workflow |
+
+### Categories
+
+| Category | Description |
+|----------|-------------|
+| `admin` | Administration and server management |
+| `economy` | Economy, shops, currencies |
+| `chat` | Chat formatting, channels, ranks |
+| `world` | World generation, editing, protection |
+| `protection` | Claim systems, anti-grief |
+| `gameplay` | Game modes, minigames, RPG |
+| `fun` | Entertainment, custom features |
+| `api` | Libraries, frameworks, virions |
+| `tools` | Utilities, developer tools |
+| `misc` | Everything else |
+
 ---
 
-## Plugin requirements
+## Build tiers (automatically determined)
 
-To be listed in the registry, a plugin must:
-
-- Be for **PocketMine-MP**.
-- Be in a **public** GitHub repository.
-- Have at least one **GitHub Release** with a **`.phar`** file.
-- Have a valid **`plugin.yml`** in the repository root.
-
-There is no requirement that the `.phar` be built in any particular way.
-Plugins built with `pmmp-plugin-actions` + `attest: true` receive a
-"Verified build" badge. Plugins with a `.phar` uploaded by GitHub Actions
-receive a "Built via CI" badge. All other plugins are listed without a badge.
-
----
-
-## Badges explained
-
-| Badge | Meaning |
-|---|---|
-| **Verified build** | `.phar` has a valid SLSA attestation from `pmmp-plugin-actions` with `attest: true` |
-| **Built via CI** | `.phar` was uploaded by the `github-actions[bot]` account |
-| *(no badge)* | `.phar` was uploaded manually by a human |
-
----
-
-## Category list
-
-Accepted categories:
-
-- `admin` — Administration and server management
-- `economy` — Economy, shops, currencies
-- `chat` — Chat formatting, channels, ranks
-- `world` — World generation, editing, protect
-- `protection` — Claim systems, anti-grief
-- `gameplay` — Game modes, minigames, RPG
-- `fun` — Entertainment, custom features
-- `api` — Libraries, frameworks, virions
-- `tools` — Utilities, developer tools
-- `misc` — Everything else
+| Badge | Requirement |
+|-------|-------------|
+| **Verified build** | Built with `pmmp-plugin-actions` + `attest: true` |
+| **Built via CI** | `.phar` uploaded by `github-actions[bot]` |
+| *(no badge)* | `.phar` uploaded manually |
 
 ---
 
 ## Keeping your listing up to date
 
-You don't need to resubmit when you release a new version. The sync
-workflow automatically picks up new releases and updates the listing.
+You don't need to submit updates manually. The sync workflow automatically picks up new releases and updates the listing.
 
-If your repository goes **private**, your listing will be marked
-`unavailable` rather than removed, so the entry is not lost if you
-re-open it later.
+If your repository goes **private**, your listing will be marked `unavailable` rather than removed.
 
-[pmmp-plugin-actions]: https://github.com/axolotl-pm/pmmp-plugin-actions
+---
+
+## Need help with CI?
+
+For the fastest path to getting your `.phar` built and attested, see:
+https://github.com/axolotl-pm/pmmp-plugin-actions
