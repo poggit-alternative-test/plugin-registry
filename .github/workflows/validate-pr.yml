@@ -36,14 +36,15 @@ jobs:
           # Use GitHub API to list files changed in this PR.
           # This is more reliable than git diff because it works regardless of
           # branch fetch state and merge conflicts.
-          python3 << 'PYEOF'
+
+          python3 - "$PR_NUMBER" "$GITHUB_REPOSITORY" "$GH_TOKEN" << 'PYEOF'
+          import sys
           import urllib.request
           import json
-          import os
 
-          pr_number = os.environ.get('PR_NUMBER', '')
-          gh_token = os.environ.get('GH_TOKEN', '')
-          repo = os.environ.get('GITHUB_REPOSITORY', '')
+          pr_number = sys.argv[1]
+          repo = sys.argv[2]
+          gh_token = sys.argv[3]
 
           url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
           req = urllib.request.Request(url, headers={
@@ -58,20 +59,20 @@ jobs:
                   added = []
                   for f in files:
                       # Only count files with status 'added'
-                      # Skip deleted, modified, renamed files
                       if f.get('status') == 'added' and f.get('filename', '').startswith('submissions/'):
                           filename = f['filename']
                           if filename.endswith('.yaml') or filename.endswith('.yml'):
                               added.append(filename)
-                  # Only print the actual result to stdout (for the shell to capture)
-                  print('\n'.join(sorted(added)))
+                  # Write result to file (clean output, no debug messages)
+                  with open('/tmp/added_files.txt', 'w') as out:
+                      out.write('\n'.join(sorted(added)))
           except Exception as e:
-              print(f"::error::Failed to fetch PR files: {e}", file=__import__('sys').stderr)
-              exit(1)
-
+              print(f"::error::Failed to fetch PR files: {e}")
+              sys.exit(1)
           PYEOF
 
-          ADDED_FILES=$(cat)
+          # Read the result from file
+          ADDED_FILES=$(cat /tmp/added_files.txt 2>/dev/null)
 
           if [ -z "$ADDED_FILES" ]; then
             echo "No new submission files added in this PR"
