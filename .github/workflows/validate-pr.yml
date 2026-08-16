@@ -39,17 +39,35 @@ jobs:
       - name: Find submission files
         id: find-files
         run: |
-          # Only find YAML files that are ADDED in this PR (not modified/deleted).
-          # Comparing PR head against the base branch gives us the diff of this PR.
-          BASE_BRANCH="${{ github.base_ref }}"
-          echo "Base branch: $BASE_BRANCH"
+          # Debug: show current state
+          echo "=== DEBUG INFO ==="
+          echo "Current branch: $(git branch --show-current || echo 'detached')"
+          echo "HEAD commit: $(git rev-parse HEAD)"
+          echo "Base branch: ${{ github.base_ref }}"
 
-          # --diff-filter=A picks only Added files; -r is required for cross-branch
-          ADDED_FILES=$(git diff --name-only -r --diff-filter=A "$BASE_BRANCH" HEAD -- submissions/ 2>/dev/null | \
+          # Debug: show what's in submissions/ on current HEAD
+          echo ""
+          echo "=== Files in submissions/ on HEAD ==="
+          git ls-files submissions/ || echo "(none)"
+
+          # Debug: show what's in submissions/ on base branch
+          echo ""
+          echo "=== Files in submissions/ on base (${{ github.base_ref }}) ==="
+          git ls-files "origin/${{ github.base_ref }}:submissions/" 2>/dev/null || echo "(none or branch not found)"
+
+          # Only find YAML files that are ADDED in this PR (not modified/deleted).
+          ADDED_FILES=$(git diff --name-only -r --diff-filter=A "${{ github.base_ref }}" HEAD -- submissions/ 2>/dev/null | \
             grep -E '\.(yaml|yml)$' | sort)
 
+          echo ""
+          echo "=== ADDED_FILES result ==="
           if [ -z "$ADDED_FILES" ]; then
             echo "No new submission files added in this PR"
+          else
+            echo "Found: $ADDED_FILES"
+          fi
+
+          if [ -z "$ADDED_FILES" ]; then
             echo "files=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -57,11 +75,6 @@ jobs:
           echo "Found newly added submission files:"
           echo "$ADDED_FILES"
 
-          # $ADDED_FILES can be multiple lines (e.g. more than one submission file
-          # in the PR) — a plain "files=$FILES" write breaks GITHUB_OUTPUT
-          # parsing since it only accepts single-line key=value pairs.
-          # The multi-file case itself is still rejected below by the
-          # "Enforce one plugin per PR" step; this just lets it get there.
           {
             echo "files<<SUBMISSION_FILES_EOF"
             echo "$ADDED_FILES"
