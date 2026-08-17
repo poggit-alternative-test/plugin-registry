@@ -776,25 +776,41 @@ jobs:
 
           echo ""
           echo "Running attestation verification..."
-          echo ""
 
-          # Build the command as an array so the inputs remain quoted safely.
-          # `if` suppresses bash -e for a failed verification: an invalid or
-          # absent attestation is an expected result, not a workflow failure.
-          VERIFY_ARGS=(attestation verify "$DOWNLOAD_URL" --repo "$PLUGIN_REPO" --signer-workflow "$SIGNER_WORKFLOW")
+          TMP_DIR="$(mktemp -d)"
+          PHAR_PATH="$TMP_DIR/$ASSET_NAME"
+
+          echo "Downloading release artifact..."
+          curl -fL --retry 3 --retry-delay 2 "$DOWNLOAD_URL" -o "$PHAR_PATH"
+
+          echo "Downloaded artifact:"
+          ls -lh "$PHAR_PATH"
+
+          VERIFY_ARGS=(
+            attestation
+            verify
+            "$PHAR_PATH"
+            --repo
+            "$PLUGIN_REPO"
+            --signer-workflow
+            "$SIGNER_WORKFLOW"
+          )
+
           if [ -n "$SOURCE_DIGEST" ]; then
-            VERIFY_ARGS+=(--source-digest "git-sha:$SOURCE_DIGEST")
+            VERIFY_ARGS+=(--source-digest "$SOURCE_DIGEST")
           fi
 
-          # Run verification
           printf 'Command:'
           printf ' %q' gh "${VERIFY_ARGS[@]}"
-          printf '\n'
+          printf '\\n'
+
           if VERIFY_OUTPUT=$(gh "${VERIFY_ARGS[@]}" 2>&1); then
             VERIFY_EXIT=0
           else
             VERIFY_EXIT=$?
           fi
+
+          rm -rf "$TMP_DIR"
 
           echo "$VERIFY_OUTPUT"
           echo ""
