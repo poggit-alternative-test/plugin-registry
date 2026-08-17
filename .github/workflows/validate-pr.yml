@@ -599,6 +599,8 @@ jobs:
     steps:
       # ── Setup: Install gh CLI and jq ──────────────────────────────────────
       - name: Setup tools
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Check if gh is available
           if ! command -v gh &> /dev/null; then
