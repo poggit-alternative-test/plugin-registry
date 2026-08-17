@@ -10,11 +10,18 @@ on:
   workflow_run:
     types: [completed]
     workflows: ["Auto Approve Plugin Submission"]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to process'
+        required: false
+        type: string
 
 # Permissions granted only when actually needed
 permissions:
   contents: write
   issues: write
+  actions: read  # Needed to access workflow run data for workflow_run trigger
 
 jobs:
   approve:
@@ -26,73 +33,72 @@ jobs:
       - name: Get workflow event data
         id: get_event
         run: |
-          # Save workflow event data to file for Python to read
-          python3 - "$GITHUB_EVENT_PATH" "$GITHUB_REPOSITORY" "$GITHUB_TOKEN" "$GITHUB_EVENT_NAME" << 'PYEOF'
-          import json
-          import sys
-          import urllib.request
-          import os
+          # For workflow_dispatch, we'll prompt for PR number
+          # For workflow_run and pull_request, we get it from the event
 
-          event_path = sys.argv[1]
-          repo = sys.argv[2]
-          gh_token = sys.argv[3]
-          event_name = sys.argv[4]
+          if [ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]; then
+            # Manual trigger - need PR number from input
+            PR_NUMBER=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('inputs', {}).get('pr_number', ''))")
+            if [ -z "$PR_NUMBER" ]; then
+              echo "::warning::No PR number provided for manual trigger"
+              echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+              echo "pr_number=" >> "$GITHUB_OUTPUT"
+              echo "base_branch=master" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            BASE_BRANCH=$(gh api repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER --jq '.base.ref')
+            echo "triggered_by=workflow_dispatch" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Triggered by: workflow_dispatch, PR: $PR_NUMBER, Base: $BASE_BRANCH"
 
-          with open(event_path) as f:
-              event = json.load(f)
+          elif [ "$GITHUB_EVENT_NAME" == "workflow_run" ]; then
+            # Get workflow run details
+            WORKFLOW_RUN_ID=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('workflow_run', {}).get('id', ''))")
+            echo "Getting PR info from workflow run: $WORKFLOW_RUN_ID"
 
-          triggered_by = 'unknown'
-          pr_number = ''
-          base_branch = ''
+            # Get PR number and base branch from workflow run API
+            WORKFLOW_DATA=$(gh api repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID --jq '{pull_requests: [.pull_requests[0]]}')
+            PR_DATA=$(echo "$WORKFLOW_DATA" | python3 -c "import json,sys; d=json.load(sys.stdin); p=d.get('pull_requests',[{}])[0] if d.get('pull_requests') else {}; print(p.get('number',''), p.get('base',{}).get('ref',''))")
 
-          if event_name == 'workflow_run':
-              # Triggered by workflow_run (auto-approve completed)
-              triggered_by = 'workflow_run'
-              workflow_run_data = event.get('workflow_run', {})
-              workflow_run_id = workflow_run_data.get('id')
+            PR_NUMBER=$(echo "$PR_DATA" | awk '{print $1}')
+            BASE_BRANCH=$(echo "$PR_DATA" | awk '{print $2}')
 
-              # Get workflow run details to find PR number
-              url = f"https://api.github.com/repos/{repo}/actions/runs/{workflow_run_id}"
-              req = urllib.request.Request(url, headers={
-                  'Accept': 'application/vnd.github+json',
-                  'Authorization': f'Bearer {gh_token}',
-                  'X-GitHub-Api-Version': '2022-11-28',
-              })
+            if [ -z "$PR_NUMBER" ]; then
+              echo "::warning::No PR found for this workflow run"
+              echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+              echo "pr_number=" >> "$GITHUB_OUTPUT"
+              echo "base_branch=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
 
-              try:
-                  with urllib.request.urlopen(req, timeout=30) as resp:
-                      run_data = json.loads(resp.read())
+            echo "triggered_by=workflow_run" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Triggered by: workflow_run, PR: $PR_NUMBER, Base: $BASE_BRANCH"
 
-                  # Get PR number from event
-                  pull_requests = run_data.get('pull_requests', [])
-                  if pull_requests:
-                      pr_number = str(pull_requests[0].get('number'))
-                      base_branch = pull_requests[0].get('base', {}).get('ref', '')
-              except Exception as e:
-                  print(f"Error fetching workflow run: {e}", file=sys.stderr)
-                  sys.exit(1)
-
-          elif event_name == 'pull_request':
-              # Triggered by PR merge
-              pr = event.get('pull_request', {})
-              if pr.get('merged'):
-                  triggered_by = 'pull_request'
-                  pr_number = str(pr.get('number'))
-                  base_branch = pr.get('base', {}).get('ref', '')
-              else:
-                  triggered_by = 'skip'
-
-          else:
-              triggered_by = 'skip'
-
-          # Write outputs
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"triggered_by={triggered_by}\n")
-              f.write(f"pr_number={pr_number}\n")
-              f.write(f"base_branch={base_branch}\n")
-
-          print(f"Triggered by: {triggered_by}, PR: {pr_number}, Base: {base_branch}")
-          PYEOF
+          elif [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+            # Check if merged
+            IS_MERGED=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('pull_request', {}).get('merged', False))")
+            if [ "$IS_MERGED" == "True" ]; then
+              PR_NUMBER=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('pull_request', {}).get('number', ''))")
+              BASE_BRANCH=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('pull_request', {}).get('base', {}).get('ref', ''))")
+              echo "triggered_by=pull_request" >> "$GITHUB_OUTPUT"
+              echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+              echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+              echo "Triggered by: pull_request, PR: $PR_NUMBER, Base: $BASE_BRANCH"
+            else
+              echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+              echo "pr_number=" >> "$GITHUB_OUTPUT"
+              echo "base_branch=" >> "$GITHUB_OUTPUT"
+              echo "Skipping: PR not merged"
+            fi
+          else
+            echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            echo "base_branch=" >> "$GITHUB_OUTPUT"
+            echo "Unknown trigger event: $GITHUB_EVENT_NAME"
+          fi
 
       # ── Skip if not a merge ─────────────────────────────────────────────
       - name: Skip if not merged
