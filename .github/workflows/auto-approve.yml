@@ -122,6 +122,43 @@ jobs:
               f.write(f"plugin_name={plugin_name}\n")
           PYEOF
 
+      # ── Persist PR context for downstream workflow_run ─────────────────────
+      # workflow_run payloads may not contain pull_requests for fork-originated
+      # runs. Persist the PR number before merging so approve-pr.yml can retrieve
+      # it reliably from this workflow run.
+      - name: Save PR context
+        if: always()
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p "${{ runner.temp }}/approve-pr-context"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = {
+              "pr_number": os.environ.get("PR_NUMBER", ""),
+              "base_branch": os.environ.get("BASE_BRANCH", ""),
+              "head_sha": os.environ.get("HEAD_SHA", ""),
+          }
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "approve-pr-context" / "context.json"
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(data, indent=2))
+          PY
+
+      - name: Upload PR context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approve-pr-context
+          path: ${{ runner.temp }}/approve-pr-context/context.json
+          retention-days: 7
+          if-no-files-found: error
+
       # ── Skip if already merged ─────────────────────────────────────────────
       - name: Already merged
         if: steps.check-pr.outputs.merged == 'true'

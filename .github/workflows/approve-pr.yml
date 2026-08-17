@@ -29,6 +29,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ── Download PR context from the triggering Auto Approve run ─────────────
+      - name: Download PR context
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v5
+        with:
+          name: approve-pr-context
+          path: ${{ runner.temp }}/approve-pr-context
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
       # ── Get workflow event data ───────────────────────────────────────────
       - name: Get workflow event data
         id: get_event
@@ -57,33 +67,37 @@ jobs:
             echo "Triggered by: workflow_dispatch, PR: $PR_NUMBER, Base: $BASE_BRANCH"
 
           elif [ "$GITHUB_EVENT_NAME" == "workflow_run" ]; then
-            # Get workflow run ID from event file
-            WORKFLOW_RUN_ID=$(python3 -c "import json,sys; f=open('$GITHUB_EVENT_PATH'); e=json.load(f); print(e.get('workflow_run',{}).get('id',''))" 2>/dev/null)
-            echo "Getting PR info from workflow run: $WORKFLOW_RUN_ID"
+            # Auto Approve runs can originate from fork PRs. In workflow_run
+            # payloads, pull_requests may be empty, so do not depend on it.
+            # The upstream Auto Approve workflow persists the PR context as an
+            # artifact; the artifact is downloaded by the step below.
+            CONTEXT_FILE="${{ runner.temp }}/approve-pr-context/context.json"
 
-            if [ -z "$WORKFLOW_RUN_ID" ]; then
-              echo "::warning::No workflow run ID found"
+            if [ ! -f "$CONTEXT_FILE" ]; then
+              echo "::warning::PR context artifact was not downloaded"
               echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
               echo "pr_number=" >> "$GITHUB_OUTPUT"
               echo "base_branch=" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            # Get the PR number from the workflow run.
-            # The workflow-run API's pull_requests entries do not reliably expose
-            # the PR base.ref, so resolve the PR separately below.
-            PR_NUMBER=$(gh api               "repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID"               --jq '.pull_requests[0].number // empty' 2>/dev/null || true)
+            PR_NUMBER=$(python3 -c "import json; print(json.load(open('$CONTEXT_FILE')).get('pr_number', ''))")
+            BASE_BRANCH=$(python3 -c "import json; print(json.load(open('$CONTEXT_FILE')).get('base_branch', ''))")
 
             if [ -z "$PR_NUMBER" ]; then
-              echo "::warning::No PR found for this workflow run"
+              echo "::warning::PR context artifact does not contain a PR number"
               echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
               echo "pr_number=" >> "$GITHUB_OUTPUT"
               echo "base_branch=" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            # Resolve the actual base branch from the PR itself.
-            BASE_BRANCH=$(gh api               "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"               --jq '.base.ref // empty' 2>/dev/null || true)
+            # Resolve the current base branch from the PR as a final sanity check.
+            RESOLVED_BASE=$(gh api               "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"               --jq '.base.ref // empty' 2>/dev/null || true)
+
+            if [ -n "$RESOLVED_BASE" ]; then
+              BASE_BRANCH="$RESOLVED_BASE"
+            fi
 
             if [ -z "$BASE_BRANCH" ]; then
               echo "::warning::Unable to determine PR base branch"
