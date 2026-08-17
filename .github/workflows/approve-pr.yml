@@ -69,13 +69,24 @@ jobs:
               exit 0
             fi
 
-            # Get PR number and base from workflow run
-            PR_INFO=$(gh api repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID --jq '.pull_requests[0] | {number: .number, base: .base.ref}')
-            PR_NUMBER=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('number',''))" 2>/dev/null)
-            BASE_BRANCH=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('base',''))" 2>/dev/null)
+            # Get the PR number from the workflow run.
+            # The workflow-run API's pull_requests entries do not reliably expose
+            # the PR base.ref, so resolve the PR separately below.
+            PR_NUMBER=$(gh api               "repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID"               --jq '.pull_requests[0].number // empty' 2>/dev/null || true)
 
             if [ -z "$PR_NUMBER" ]; then
               echo "::warning::No PR found for this workflow run"
+              echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
+              echo "pr_number=" >> "$GITHUB_OUTPUT"
+              echo "base_branch=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # Resolve the actual base branch from the PR itself.
+            BASE_BRANCH=$(gh api               "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"               --jq '.base.ref // empty' 2>/dev/null || true)
+
+            if [ -z "$BASE_BRANCH" ]; then
+              echo "::warning::Unable to determine PR base branch"
               echo "triggered_by=skip" >> "$GITHUB_OUTPUT"
               echo "pr_number=" >> "$GITHUB_OUTPUT"
               echo "base_branch=" >> "$GITHUB_OUTPUT"
@@ -121,12 +132,14 @@ jobs:
       # down once the PR is closed/merged and can cause checkout to fail here.
       # The base branch already contains the merged submission file at this point.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        if: steps.get_event.outputs.triggered_by != 'skip'
+        uses: actions/checkout@v5
         with:
           ref: ${{ steps.get_event.outputs.base_branch }}
 
       # ── Find submission files (NEWLY ADDED only) ─────────────────────────────
       - name: Find submission files
+        if: steps.get_event.outputs.triggered_by != 'skip'
         id: find-files
         env:
           GH_TOKEN: ${{ github.token }}
@@ -207,6 +220,7 @@ jobs:
 
       # ── Enforce one plugin per PR ────────────────────────────────────────
       - name: Enforce one plugin per PR
+        if: steps.get_event.outputs.triggered_by != 'skip'
         run: |
           COUNT=$(echo "${{ steps.find-files.outputs.files }}" | wc -l)
           if [ "$COUNT" -gt 1 ]; then
@@ -220,6 +234,7 @@ jobs:
 
       # ── Process each submission file ──────────────────────────────────────
       - name: Process submissions
+        if: steps.get_event.outputs.triggered_by != 'skip'
         id: process
         env:
           FILES: ${{ steps.find-files.outputs.files }}
@@ -738,6 +753,7 @@ jobs:
 
       # ── Commit index changes ──────────────────────────────────────────────
       - name: Commit index changes
+        if: steps.get_event.outputs.triggered_by != 'skip'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -763,6 +779,7 @@ jobs:
 
       # ── Delete submission files ───────────────────────────────────────────
       - name: Delete submission files
+        if: steps.get_event.outputs.triggered_by != 'skip'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -803,6 +820,7 @@ jobs:
 
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Summary
+        if: steps.get_event.outputs.triggered_by != 'skip'
         run: |
           echo ""
           echo "========================================"
