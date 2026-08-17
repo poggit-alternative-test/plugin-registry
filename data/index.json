@@ -28,5 +28,46 @@
       "tag": "nightly",
       "download_url": "https://github.com/IvanCraft623/RankSystem/releases/download/nightly/RankSystem.phar"
     }
+  },
+  {
+    "id": "axolotl-plugin-orphanage/ScoreHud",
+    "name": "ScoreHud",
+    "tag": "8.0.1",
+    "version": "8.0.1",
+    "all_tags": [
+      "8.0.1"
+    ],
+    "dev_build": null,
+    "api": [
+      "5.45.0"
+    ],
+    "author": [
+      "Ifera"
+    ],
+    "description": "Add fully customizable scoreboards to your server.",
+    "category": "fun",
+    "icon_path": "meta/ScoreHud.PNG",
+    "icon_url": "https://raw.githubusercontent.com/axolotl-plugin-orphanage/ScoreHud/HEAD/meta/ScoreHud.PNG",
+    "repo_url": "https://github.com/axolotl-plugin-orphanage/ScoreHud",
+    "download_url": "https://github.com/axolotl-plugin-orphanage/ScoreHud/releases/download/8.0.1/ScoreHud.phar",
+    "download_count": 4,
+    "download_total": 4,
+    "stargazers_count": 0,
+    "build_tier": null,
+    "attestation_checked_at": "2026-08-17T02:42:49Z",
+    "approved_at": "2026-08-17T02:42:49Z",
+    "last_synced_at": "2026-08-17T02:42:49Z",
+    "featured": false,
+    "featured_marked_at": null,
+    "submission_pr_number": 12,
+    "keywords": [
+      "fun",
+      "hud",
+      "scoreboard",
+      "scorehud",
+      "display"
+    ],
+    "fork": false,
+    "forked_from": null
   }
 ]
