@@ -1,0 +1,268 @@
+name: Post Plugin Security Report
+
+# Trusted reporting workflow. It runs after the untrusted pull_request workflow
+# completes, then uses its own write-capable token to create/update the PR comment.
+on:
+  workflow_run:
+    workflows: ["Validate Plugin Submission"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  post-report:
+    name: Post PHP security report
+    # workflow_run also fires for manual runs; only PR validation runs have a
+    # pull request attached to the event.
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download security report artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          echo "Looking for security-report artifact from workflow run ${WORKFLOW_RUN_ID}..."
+
+          ARTIFACT_ID=$(gh api \
+            "repos/${REPOSITORY}/actions/runs/${WORKFLOW_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "security-report" and .expired == false) | .id' \
+            | head -n 1)
+
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::security-report artifact was not found for workflow run ${WORKFLOW_RUN_ID}"
+            exit 1
+          fi
+
+          echo "Found artifact: ${ARTIFACT_ID}"
+
+          rm -rf /tmp/security-report-artifact
+          mkdir -p /tmp/security-report-artifact
+
+          gh api \
+            "repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > /tmp/security-report.zip
+
+          unzip -q /tmp/security-report.zip -d /tmp/security-report-artifact
+
+          if [ ! -f /tmp/security-report-artifact/security-report.json ]; then
+            echo "::error::security-report.json was not found inside the artifact"
+            exit 1
+          fi
+
+          cp /tmp/security-report-artifact/security-report.json "$GITHUB_WORKSPACE/security-report.json"
+
+          echo "Security report downloaded successfully."
+          cat "$GITHUB_WORKSPACE/security-report.json"
+
+      - name: Post or update security report comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          python3 << 'PYEOF'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ['GH_TOKEN']
+          repository = os.environ['REPOSITORY']
+          run_url = os.environ['WORKFLOW_RUN_URL']
+          workflow_conclusion = os.environ.get('WORKFLOW_CONCLUSION', 'unknown')
+          marker = '<!-- plugin-registry-php-security-report -->'
+          report_path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'security-report.json')
+
+          def api(path, method='GET', payload=None):
+              url = f'https://api.github.com{path}'
+              data = json.dumps(payload).encode('utf-8') if payload is not None else None
+              request = urllib.request.Request(url, data=data, method=method, headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {token}',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'plugin-registry-security-report',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  body = response.read()
+                  return json.loads(body) if body else None
+
+          def compact(value, limit=240):
+              return ' '.join(str(value or '').split()).replace('|', '\\|').replace('`', "'")[:limit]
+
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8'))
+          pull_requests = event.get('workflow_run', {}).get('pull_requests', [])
+          if not pull_requests:
+              print('No pull request is associated with this workflow run; skipping comment.')
+              raise SystemExit(0)
+
+          pr_number = pull_requests[0]['number']
+
+          with open(report_path, encoding='utf-8') as f:
+              report = json.load(f)
+
+          plugin_repo = report.get('plugin_repo', 'unknown')
+          attestation = report.get('attestation', {})
+          php_security = report.get('php_security', {})
+          warnings = php_security.get('warning_findings', [])
+          errors = php_security.get('error_findings', [])
+          scan_status = php_security.get('scan_status', 'unknown')
+          scan_error = php_security.get('scan_error', '')
+
+          attestation_tier = attestation.get('tier', 'unknown')
+          attestation_message = attestation.get('message', '')
+
+          if attestation_tier == 'verified':
+              attestation_icon = '&#10004;'
+              attestation_status = 'Verified'
+          elif attestation_tier == 'skipped':
+              attestation_icon = '&#9888;'
+              attestation_status = 'Skipped'
+          elif attestation_tier == 'no-phar':
+              attestation_icon = '&#10060;'
+              attestation_status = 'No .phar'
+          else:
+              attestation_icon = '&#10060;'
+              attestation_status = 'Unverified'
+
+          if scan_status == 'passed' and not errors:
+              php_status = ':white_check_mark: **Status:** No blocking ERROR findings'
+          elif errors:
+              php_status = ':x: **Status:** Blocking ERROR findings detected'
+          else:
+              php_status = ':warning: **Status:** Security scan failed'
+
+          if workflow_conclusion == 'success' and not errors and scan_status == 'passed':
+              validation_status = '&#10004; **Validation workflow passed**'
+          else:
+              validation_status = '&#10060; **Validation workflow failed**'
+
+          lines = [
+              marker,
+              '## Security Analysis Report',
+              '',
+              f'### Plugin: `{plugin_repo}`',
+              '',
+              f'[Open validation workflow run]({run_url})',
+              '',
+              '***',
+              '',
+              '### Attestation Check',
+              f'{attestation_icon} **Status:** {attestation_status}',
+              '',
+              compact(attestation_message, 1000),
+              '',
+              '> For the best security rating, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) for your CI/CD pipeline.',
+              '',
+              '***',
+              '',
+              '### PHP Security Analysis',
+              php_status,
+              '',
+              '> Semgrep scans the submitted plugin repository using PHP and security-audit rules. ERROR findings block approval; WARNING findings are listed below for human review.',
+          ]
+
+          if scan_error:
+              lines.extend([
+                  '',
+                  f'> **Scan error:** {compact(scan_error, 1000)}',
+              ])
+
+          if errors:
+              lines.extend([
+                  '',
+                  '#### Blocking ERROR Findings',
+                  '',
+                  '| File | Line | Rule | Finding |',
+                  '|---|---:|---|---|',
+              ])
+              for finding in errors[:20]:
+                  lines.append(
+                      f"| `{compact(finding.get('path'))}` | {finding.get('line', '?')} | `{compact(finding.get('rule'))}` | {compact(finding.get('message'))} |"
+                  )
+              if len(errors) > 20:
+                  lines.extend([
+                      '',
+                      f'> Showing the first 20 of {len(errors)} blocking findings; see the validation workflow log for all findings.',
+                  ])
+
+          lines.extend(['', '#### WARNING Findings', ''])
+
+          if warnings:
+              lines.extend([
+                  '| File | Line | Rule | Finding |',
+                  '|---|---:|---|---|',
+              ])
+              for finding in warnings[:20]:
+                  lines.append(
+                      f"| `{compact(finding.get('path'))}` | {finding.get('line', '?')} | `{compact(finding.get('rule'))}` | {compact(finding.get('message'))} |"
+                  )
+              if len(warnings) > 20:
+                  lines.extend([
+                      '',
+                      f'> Showing the first 20 of {len(warnings)} warnings; see the validation workflow log for all findings.',
+                  ])
+          else:
+              lines.append(':white_check_mark: No Semgrep WARNING findings.')
+
+          lines.extend(['', '***', '', '### Summary', ''])
+
+          if errors or scan_status != 'passed':
+              lines.append(validation_status + ' — security issues require attention before approval.')
+          elif attestation_tier != 'verified':
+              lines.append('&#10060; **Manual review required** — Attestation is not verified.')
+          else:
+              lines.append('&#10004; **Ready for approval** — Security checks passed.')
+
+          lines.extend([
+              '',
+              '| Check | Status |',
+              '|-------|--------|',
+              f"| Attestation | {attestation_icon} {attestation_status} |",
+              f"| PHP security scan | {'&#10060; Blocking errors' if errors else ('&#9888; Scan failed' if scan_status != 'passed' else '&#10004; No blocking errors')} |",
+              f"| Validation workflow | {'&#10004; Passed' if workflow_conclusion == 'success' else '&#10060; ' + workflow_conclusion.capitalize()} |",
+          ])
+
+          if attestation_tier != 'verified':
+              lines.extend([
+                  '',
+                  '> For verified builds, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions).',
+              ])
+
+          lines.extend([
+              '',
+              '***',
+              f"*This report is generated automatically. Last updated: {__import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*",
+          ])
+
+          body = '\n'.join(lines)
+
+          comments = api(f'/repos/{repository}/issues/{pr_number}/comments?per_page=100')
+          existing = next((comment for comment in comments if marker in comment.get('body', '')), None)
+
+          if existing:
+              api(
+                  f"/repos/{repository}/issues/comments/{existing['id']}",
+                  'PATCH',
+                  {'body': body},
+              )
+              print(f'Updated PHP security report on PR #{pr_number}.')
+          else:
+              api(
+                  f'/repos/{repository}/issues/{pr_number}/comments',
+                  'POST',
+                  {'body': body},
+              )
+              print(f'Posted PHP security report on PR #{pr_number}.')
+          PYEOF

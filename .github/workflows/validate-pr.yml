@@ -9,12 +9,11 @@ on:
 
 # Permissions:
 # - contents: read - read repo contents
-# - issues: write - post comments on PR
+# - security-events: write - security scan integration
 # - security-events: write - upload security scan results
 # - actions: read - access workflow info
 permissions:
   contents: read
-  issues: write
   security-events: write
   actions: read
   id-token: write   # Needed for OIDC verification in attestation check
@@ -814,26 +813,53 @@ jobs:
           fi
 
       # ── PHP security scan of the submitted plugin ─────────────────────────
-      # CodeQL does not support PHP. Semgrep supports PHP and scans the plugin
-      # repository itself (not this registry) with security-audit rules.
+      # Run one Semgrep scan at WARNING severity. The JSON result contains both
+      # WARNING and ERROR findings. ERROR findings are extracted separately and
+      # are used to fail validation after the report artifact is uploaded.
       - name: Scan submitted plugin PHP source
         id: php-security-scan
         if: steps.get-submission.outputs.plugin_repo != ''
         env:
           PLUGIN_REPO: ${{ steps.get-submission.outputs.plugin_repo }}
+          ATTESTATION_TIER: ${{ steps.check-attestation.outputs.tier }}
+          ATTESTATION_MESSAGE: ${{ steps.check-attestation.outputs.message }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
+          REPORT_PATH="$GITHUB_WORKSPACE/security-report.json"
           PLUGIN_DIR="$(mktemp -d /tmp/plugin-source.XXXXXX)"
-          echo "Cloning source for security scan: $PLUGIN_REPO"
-          # The repository URL was validated earlier. Do not pass this
-          # workflow's token to the submitted repository.
-          git clone --depth 1 --no-recurse-submodules "https://github.com/${PLUGIN_REPO}.git" "$PLUGIN_DIR"
+          SEMGREP_JSON="$(mktemp /tmp/semgrep-report.XXXXXX.json)"
 
-          echo "Scanning PHP source for warnings that need human review..."
-          # Findings are printed to the Actions log, but without `--error`
-          # Semgrep exits successfully so warnings do not block the PR.
-          WARNINGS_JSON="$(mktemp /tmp/semgrep-warnings.XXXXXX.json)"
+          echo "Cloning source for security scan: $PLUGIN_REPO"
+          if ! git clone --depth 1 --no-recurse-submodules "https://github.com/${PLUGIN_REPO}.git" "$PLUGIN_DIR"; then
+            echo "::error::Failed to clone submitted plugin repository"
+            python3 - "$REPORT_PATH" << 'PYEOF'
+          import json
+          import os
+          import sys
+
+          report_path = sys.argv[1]
+          report = {
+              "plugin_repo": os.environ["PLUGIN_REPO"],
+              "attestation": {
+                  "tier": os.environ.get("ATTESTATION_TIER", "unknown"),
+                  "message": os.environ.get("ATTESTATION_MESSAGE", ""),
+              },
+              "php_security": {
+                  "scan_status": "failed",
+                  "scan_error": "Unable to clone the plugin repository.",
+                  "warning_findings": [],
+                  "error_findings": [],
+              },
+          }
+          with open(report_path, "w", encoding="utf-8") as f:
+              json.dump(report, f, indent=2)
+          PYEOF
+            exit 1
+          fi
+
+          echo "Scanning PHP source for WARNING and ERROR security findings..."
+          set +e
           docker run --rm \
             --volume "$PLUGIN_DIR:/src:ro" \
             semgrep/semgrep \
@@ -843,187 +869,140 @@ jobs:
               --severity WARNING \
               --json \
               --metrics=off \
-              /src > "$WARNINGS_JSON"
+              /src > "$SEMGREP_JSON"
+          SEMGREP_EXIT=$?
+          set -e
 
-          # Pass a compact, Markdown-safe list of warnings to the automated
-          # PR comment. Limit it to avoid exceeding GitHub output limits.
-          python3 - "$WARNINGS_JSON" << 'PYEOF'
+          python3 - "$SEMGREP_JSON" "$REPORT_PATH" "$SEMGREP_EXIT" << 'PYEOF'
           import json
           import os
           import sys
           import uuid
 
-          with open(sys.argv[1], encoding='utf-8') as report:
-              findings = json.load(report).get('results', [])
+          semgrep_path = sys.argv[1]
+          report_path = sys.argv[2]
+          semgrep_exit = int(sys.argv[3])
 
           def compact(value, limit=240):
               return ' '.join(str(value or '').split()).replace('|', '\\|').replace('`', "'")[:limit]
 
-          if findings:
-              shown = findings[:20]
-              lines = [
+          try:
+              with open(semgrep_path, encoding='utf-8') as f:
+                  payload = json.load(f)
+          except Exception as exc:
+              report = {
+                  "plugin_repo": os.environ["PLUGIN_REPO"],
+                  "attestation": {
+                      "tier": os.environ.get("ATTESTATION_TIER", "unknown"),
+                      "message": os.environ.get("ATTESTATION_MESSAGE", ""),
+                  },
+                  "php_security": {
+                      "scan_status": "failed",
+                      "scan_error": f"Semgrep did not return valid JSON: {compact(exc, 500)}",
+                      "warning_findings": [],
+                      "error_findings": [],
+                  },
+              }
+              with open(report_path, "w", encoding="utf-8") as f:
+                  json.dump(report, f, indent=2)
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write("has_blocking_errors=true\n")
+                  out.write("scan_failed=true\n")
+              print(f"::error::{report['php_security']['scan_error']}")
+              raise SystemExit(0)
+
+          findings = payload.get("results", [])
+          warnings = []
+          errors = []
+
+          for finding in findings:
+              item = {
+                  "path": str(finding.get("path", "")).removeprefix("/src/"),
+                  "line": finding.get("start", {}).get("line", "?"),
+                  "rule": str(finding.get("check_id", "")),
+                  "message": str(finding.get("extra", {}).get("message", "")),
+                  "severity": str(finding.get("extra", {}).get("severity", "")).upper(),
+              }
+              if item["severity"] == "ERROR":
+                  errors.append(item)
+              else:
+                  warnings.append(item)
+
+          scan_status = "passed"
+          scan_error = ""
+          if semgrep_exit != 0:
+              scan_status = "failed"
+              scan_error = f"Semgrep exited with code {semgrep_exit}. Review the validation workflow log."
+
+          report = {
+              "plugin_repo": os.environ["PLUGIN_REPO"],
+              "attestation": {
+                  "tier": os.environ.get("ATTESTATION_TIER", "unknown"),
+                  "message": os.environ.get("ATTESTATION_MESSAGE", ""),
+              },
+              "php_security": {
+                  "scan_status": scan_status,
+                  "scan_error": scan_error,
+                  "warning_findings": warnings,
+                  "error_findings": errors,
+              },
+          }
+
+          with open(report_path, "w", encoding="utf-8") as f:
+              json.dump(report, f, indent=2)
+
+          warning_lines = []
+          if warnings:
+              shown = warnings[:20]
+              warning_lines = [
                   ':warning: **Semgrep WARNING findings — human review required**',
                   '',
                   '| File | Line | Rule | Finding |',
                   '|---|---:|---|---|',
               ]
               for finding in shown:
-                  extra = finding.get('extra', {})
-                  path = str(finding.get('path', '')).removeprefix('/src/')
-                  line = finding.get('start', {}).get('line', '?')
-                  lines.append(
-                      f"| `{compact(path)}` | {line} | `{compact(finding.get('check_id'))}` | {compact(extra.get('message'))} |"
+                  warning_lines.append(
+                      f"| `{compact(finding['path'])}` | {finding['line']} | `{compact(finding['rule'])}` | {compact(finding['message'])} |"
                   )
-              if len(findings) > len(shown):
-                  lines.extend(['', f"> Showing the first {len(shown)} of {len(findings)} warnings; see the workflow log for the full list."])
-              summary = '\n'.join(lines)
+              if len(warnings) > len(shown):
+                  warning_lines.extend([
+                      '',
+                      f"> Showing the first {len(shown)} of {len(warnings)} warnings; see the validation workflow log for the full list.",
+                  ])
+              warning_summary = '\n'.join(warning_lines)
           else:
-              summary = ':white_check_mark: No Semgrep WARNING findings.'
+              warning_summary = ':white_check_mark: No Semgrep WARNING findings.'
 
-          output_path = os.environ['GITHUB_OUTPUT']
-          delimiter = f"SEMGREP_WARNINGS_{uuid.uuid4().hex}"
-          with open(output_path, 'a', encoding='utf-8') as output:
-              output.write(f"warnings_summary<<{delimiter}\n{summary}\n{delimiter}\n")
-          print(summary)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              delimiter = f"SEMGREP_WARNINGS_{uuid.uuid4().hex}"
+              out.write(f"warnings_summary<<{delimiter}\n{warning_summary}\n{delimiter}\n")
+              out.write(f"has_blocking_errors={'true' if errors else 'false'}\n")
+              out.write(f"scan_failed={'true' if scan_status == 'failed' else 'false'}\n")
+
+          print(warning_summary)
+          print("")
+          print(f"WARNING findings: {len(warnings)}")
+          print(f"ERROR findings: {len(errors)}")
+          print(f"Semgrep exit code: {semgrep_exit}")
           PYEOF
 
-          echo "Scanning PHP source for blocking security errors..."
-          # Only ERROR findings fail the check. They need human review and a
-          # fix or an explicit maintainer decision before approval.
-          docker run --rm \
-            --volume "$PLUGIN_DIR:/src:ro" \
-            semgrep/semgrep \
-            semgrep scan \
-              --config p/php \
-              --config p/security-audit \
-              --severity ERROR \
-              --error \
-              --metrics=off \
-              /src
+      # ── Upload report for the trusted reporting workflow ──────────────────
+      - name: Upload security report artifact
+        if: always() && steps.get-submission.outputs.plugin_repo != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.json
+          if-no-files-found: error
+          retention-days: 7
 
-      # ── Post PR Comment with Security Summary ────────────────────────────
-      - name: Post security report comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PLUGIN_REPO: ${{ steps.get-submission.outputs.plugin_repo }}
-          ATTESTATION_TIER: ${{ steps.check-attestation.outputs.tier }}
-          ATTESTATION_MSG: ${{ steps.check-attestation.outputs.message }}
-          PHP_WARNING_SUMMARY: ${{ steps.php-security-scan.outputs.warnings_summary }}
+      # ── Fail validation only after the report artifact is available ────────
+      - name: Enforce blocking security findings
+        if: steps.php-security-scan.outputs.has_blocking_errors == 'true'
         run: |
-          if [ -z "$PLUGIN_REPO" ]; then
-            echo "No plugin repo, skipping comment"
-            exit 0
-          fi
-
-          echo "Plugin Repo: $PLUGIN_REPO"
-          echo "Attestation Tier: $ATTESTATION_TIER"
-          echo "Attestation Message: $ATTESTATION_MSG"
-
-          # Determine badge based on tier
-          case "$ATTESTATION_TIER" in
-            verified)
-              ICON="&#10004;"
-              BADGE="Verified"
-              ;;
-            *)
-              ICON="&#10060;"
-              BADGE="Unverified"
-              ;;
-          esac
-
-          NOW=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-          # Build comment header.
-          # NOTE: this heredoc is intentionally UNQUOTED (<< COMMENTEOF, not
-          # << 'COMMENTEOF') so $PLUGIN_REPO/$ICON/$BADGE/$ATTESTATION_MSG/$NOW
-          # are substituted directly. The previous version used repeated "%s"
-          # placeholders filled in afterwards with `sed -i "s/%s/.../g"` — but
-          # each sed call replaces EVERY "%s" in the whole file (the `g` flag
-          # only means "all matches per line", and sed -i still scans every
-          # line), so the very first sed pass overwrote all five placeholders
-          # with $PLUGIN_REPO and the rest of the fields never got filled in.
-          cat > /tmp/comment_body.txt << COMMENTEOF
-          ## Security Analysis Report
-
-          ### Plugin: $PLUGIN_REPO
-
-          ***
-
-          ### Attestation Check
-          $ICON **Status:** $BADGE
-
-          $ATTESTATION_MSG
-
-          > For the best security rating, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) for your CI/CD pipeline.
-
-          ***
-
-          ### PHP Security Analysis
-          :white_check_mark: **Status:** No blocking ERROR findings
-
-          > Semgrep scans the submitted plugin repository's PHP source using PHP and security-audit rules. ERROR findings block approval; WARNING findings are listed below for human review.
-
-          $PHP_WARNING_SUMMARY
-
-          ***
-
-          ### Summary
-          COMMENTEOF
-
-          # Add recommendation based on tier
-          case "$ATTESTATION_TIER" in
-            verified)
-              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
-          &#10004; **Ready for approval** - All security checks passed.
-
-          | Check | Status |
-          |-------|--------|
-          | Attestation | &#10004; Verified |
-          | PHP security scan | &#10004; No blocking errors |
-          SUMMARYEOF
-              ;;
-            *)
-              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
-          &#10060; **Manual review required** - Attestation not verified.
-
-          | Check | Status |
-          |-------|--------|
-          | Attestation | &#10060; Unverified |
-          | PHP security scan | &#10004; No blocking errors |
-
-          > For verified builds, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions).
-          SUMMARYEOF
-              ;;
-          esac
-
-          # Add footer (unquoted heredoc so $NOW expands directly)
-          cat >> /tmp/comment_body.txt << FOOTEREOF
-
-          ***
-          *This report is generated automatically. Last updated: $NOW*
-          FOOTEREOF
-
-          echo "Comment body prepared:"
-          cat /tmp/comment_body.txt
-
-          # Post or update comment
-          echo ""
-          echo "Posting security report comment..."
-
-          # Check if comment already exists
-          COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            --jq '.[] | select(.body | contains("Security Analysis Report")) | .id' \
-            2>/dev/null | head -1)
-
-          if [ -n "$COMMENT_ID" ]; then
-            echo "Updating existing comment $COMMENT_ID..."
-            gh api --method PATCH repos/${{ github.repository }}/issues/comments/$COMMENT_ID \
-              --field body="$(cat /tmp/comment_body.txt)"
+          if [ "${{ steps.php-security-scan.outputs.scan_failed }}" = "true" ]; then
+            echo "::error::PHP security scan failed. Review the security report and workflow log."
           else
-            echo "Creating new comment..."
-            gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-              --method POST \
-              --field body="$(cat /tmp/comment_body.txt)"
+            echo "::error::Semgrep ERROR findings detected. These findings block approval."
           fi
-
-          echo "Comment posted successfully"
+          exit 1
