@@ -397,7 +397,7 @@ jobs:
                                           'download_url': asset['browser_download_url']
                                       }
                                       print(f"  nightly: {tag}")
-                              print(f"  dev_build: enabled")
+                                      print(f"  dev_build: enabled")
                                       break
 
                       # Track stable release (non-prerelease, or has "nightly" in tag but is the main release)
