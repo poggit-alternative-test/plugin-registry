@@ -568,7 +568,7 @@ jobs:
 
                   # Add source digest if available for stricter verification
                   if source_digest:
-                      verify_cmd.extend(['--source-digest', f'git-sha:{source_digest}'])
+                      verify_cmd.extend(['--source-digest', source_digest])
 
                   print(f"  Running: gh attestation verify ...")
                   verify_result = subprocess.run(
