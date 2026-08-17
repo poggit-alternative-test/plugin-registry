@@ -579,31 +579,12 @@ jobs:
               except Exception as e:
                   print(f"  attestation check failed: {e}")
 
-              # ── Fallback: Check uploader if attestation failed ──────────────
-              if build_tier is None:
-                  try:
-                      # Get all releases to find the uploader of the .phar asset
-                      for rel in all_releases:
-                          for asset in rel.get('assets', []):
-                              # Match by .phar filename
-                              if asset['name'].lower().endswith('.phar'):
-                                  login = asset.get('uploader', {}).get('login', '')
-                                  if login == 'github-actions[bot]':
-                                      build_tier = 'built-via-ci'
-                                      print(f"  build_tier: built-via-ci (uploaded by github-actions[bot])")
-                                  elif login:
-                                      build_tier = 'unverified'
-                                      print(f"  build_tier: unverified (uploaded by {login})")
-                                  else:
-                                      build_tier = 'unverified'
-                                      print(f"  build_tier: unverified (no uploader info)")
-                                  break
-                  except Exception as e:
-                      print(f"  uploader check failed: {e}")
-
+              # ── Fallback: All non-verified builds are unverified ─────────────────
+              # Note: github-actions[bot] can be impersonated by anyone, so we
+              # don't treat it as a trust signal. Only SLSA attestation matters.
               if build_tier is None:
                   build_tier = 'unverified'
-                  print(f"  build_tier: unverified (no CI detected)")
+                  print(f"  build_tier: unverified (attestation not verified)")
 
               # Fetch stargazers count
               try:

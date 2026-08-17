@@ -157,7 +157,7 @@ Fields that MUST be read automatically (never ask the developer to re-enter thes
 
 `download_count` is the download count for the current approved stable version. `download_total` is the cumulative download count across all stable releases ever submitted. Frontend displays these as `{download_count}/{download_total}`.
 
-`build_tier` is one of: `"verified"` (has SLSA attestation), `"built-via-ci"` (`.phar` uploaded by `github-actions[bot]`), `"unverified"` (manually uploaded), or `null` (unknown / release unavailable). `icon_path` is the developer-submitted path or `null`; `icon_url` uses `HEAD` in place of a branch name so GitHub resolves it server-side to the current default branch — no API call to look up the branch is needed. If neither the submitted path nor `assets/icon.png` resolves, the registry's own default icon (constant TBD) is used. `unavailable: true` may be set by the sync workflow when a repo or release becomes inaccessible rather than silently dropping the entry. `all_tags` tracks all stable release tags that have been submitted (oldest last), used for cumulative download counting.
+`build_tier` is one of: `"verified"` (has valid SLSA attestation from pmmp-plugin-actions), `"unverified"` (no valid attestation — CI-built without attestation, manual upload, etc.), or `null` (unknown / release unavailable). Note: `github-actions[bot]` is not a trust signal because it can be impersonated by anyone — only SLSA attestation provides cryptographic proof of build origin. `icon_path` is the developer-submitted path or `null`; `icon_url` uses `HEAD` in place of a branch name so GitHub resolves it server-side to the current default branch — no API call to look up the branch is needed. If neither the submitted path nor `assets/icon.png` resolves, the registry's own default icon (constant TBD) is used. `unavailable: true` may be set by the sync workflow when a repo or release becomes inaccessible rather than silently dropping the entry. `all_tags` tracks all stable release tags that have been submitted (oldest last), used for cumulative download counting.
 
 ## 6. Security model (defense in depth — 6 layers)
 
@@ -180,8 +180,8 @@ Do not skip or simplify the following layers during implementation:
 - The system **never builds** anything on a developer's behalf.
 - The badge shown is determined by:
   - A valid SLSA attestation exists → **"Verified build"**
-  - No attestation, but the asset was uploaded by `github-actions[bot]` → **"Built via CI"**
-  - Asset uploaded manually by a human → no badge / **"Unverified"**
+  - No valid attestation (CI-built without attestation, manual upload, etc.) → **"Unverified"**
+- Note: `github-actions[bot]` is **not** treated as a trust signal because it can be impersonated by anyone. Only SLSA attestation provides cryptographic proof of build origin.
 - If the repo has no stable Release with a `.phar` at submission time → **reject automatically**, with a message pointing to the `pmmp-plugin-actions` template/docs as the fastest path to setting up CI.
 
 ## 8. Label taxonomy

@@ -138,8 +138,8 @@
 
     "build_tier": {
       "type": "string",
-      "enum": ["verified", "built-via-ci", "unverified", null],
-      "description": "Badge tier: 'verified' = has SLSA attestation; 'built-via-ci' = asset uploaded by github-actions[bot]; 'unverified' = manually uploaded asset; null = unknown/unavailable."
+      "enum": ["verified", "unverified", null],
+      "description": "Badge tier: 'verified' = has valid SLSA attestation from pmmp-plugin-actions; 'unverified' = no valid attestation (may be CI-built without attestation, manual upload, or unavailable); null = unknown/not checked."
     },
 
     "attestation_checked_at": {

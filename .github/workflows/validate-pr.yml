@@ -789,18 +789,10 @@ jobs:
             echo "tier=verified" >> "$GITHUB_OUTPUT"
             echo "message=Plugin .phar is verified via SLSA attestation from axolotl-pm/pmmp-plugin-actions" >> "$GITHUB_OUTPUT"
           else
-            # Check if built via CI even if not verified
-            echo "Checking if built via CI..."
-
-            if [ "$UPLOADER" == "github-actions[bot]" ]; then
-              echo "✓ Built via GitHub Actions (unverified attestation)"
-              echo "tier=built-via-ci" >> "$GITHUB_OUTPUT"
-              echo "message=Built via GitHub Actions but attestation not verified. Consider using pmmp-plugin-actions for verified builds." >> "$GITHUB_OUTPUT"
-            else
-              echo "✗ Manual upload detected"
-              echo "tier=unverified" >> "$GITHUB_OUTPUT"
-              echo "message=.phar uploaded manually without CI. This is acceptable but not recommended." >> "$GITHUB_OUTPUT"
-            fi
+            # Verification failed - tier is unverified
+            echo "✗ Attestation verification failed - tier is unverified"
+            echo "tier=unverified" >> "$GITHUB_OUTPUT"
+            echo "message=.phar is not verified via SLSA attestation. For verified builds, use pmmp-plugin-actions." >> "$GITHUB_OUTPUT"
           fi
 
       # ── CodeQL Security Scan ──────────────────────────────────────────────
@@ -849,17 +841,9 @@ jobs:
               ICON="&#10004;"
               BADGE="Verified"
               ;;
-            built-via-ci)
-              ICON="&#9888;"
-              BADGE="Built via CI"
-              ;;
-            unverified|no-phar)
+            *)
               ICON="&#10060;"
               BADGE="Unverified"
-              ;;
-            *)
-              ICON="&#9898;"
-              BADGE="Skipped"
               ;;
           esac
 
@@ -919,43 +903,17 @@ jobs:
           | Dependencies | &#10004; Secure |
           SUMMARYEOF
               ;;
-            built-via-ci)
-              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
-          &#9888; **Conditional approval** - Built via CI but attestation not verified.
-
-          | Check | Status |
-          |-------|--------|
-          | Attestation | &#9888; Built via CI |
-          | CodeQL | &#10004; No issues |
-          | Dependencies | &#10004; Secure |
-
-          > Consider using [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) to get verified builds.
-          SUMMARYEOF
-              ;;
-            unverified|no-phar)
-              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
-          &#9888; **Needs review** - Manual upload detected.
-
-          | Check | Status |
-          |-------|--------|
-          | Attestation | &#10060; Manual upload |
-          | CodeQL | &#10004; No issues |
-          | Dependencies | &#10004; Secure |
-
-          > Consider using [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) for verified builds.
-          SUMMARYEOF
-              ;;
             *)
               cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
-          &#10060; **Manual review required** - Could not verify build.
+          &#10060; **Manual review required** - Attestation not verified.
 
           | Check | Status |
           |-------|--------|
-          | Attestation | &#10060; Not verified |
+          | Attestation | &#10060; Unverified |
           | CodeQL | &#10004; No issues |
           | Dependencies | &#10004; Secure |
 
-          > Maintainer review recommended before approval.
+          > For verified builds, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions).
           SUMMARYEOF
               ;;
           esac
