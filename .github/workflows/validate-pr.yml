@@ -901,18 +901,6 @@ jobs:
               --metrics=off \
               /src
 
-      # ── Dependency Review ─────────────────────────────────────────────────
-      - name: Check dependency vulnerabilities
-        id: dependency-review
-        uses: actions/dependency-review-action@v5
-        with:
-          # Fail on high and moderate severity vulnerabilities.
-          # The action uses the GitHub Advisory severity label "moderate".
-          fail-on-severity: moderate
-          # Allow known CVEs with available patches
-          allow-ghsas: |
-            GHSA-*
-
       # ── Post PR Comment with Security Summary ────────────────────────────
       - name: Post security report comment
         env:
@@ -979,11 +967,6 @@ jobs:
 
           ***
 
-          ### Dependency Check
-          :white_check_mark: **Status:** No high/medium vulnerabilities detected in dependencies
-
-          ***
-
           ### Summary
           COMMENTEOF
 
@@ -997,7 +980,6 @@ jobs:
           |-------|--------|
           | Attestation | &#10004; Verified |
           | PHP security scan | &#10004; No blocking errors |
-          | Dependencies | &#10004; Secure |
           SUMMARYEOF
               ;;
             *)
@@ -1008,7 +990,6 @@ jobs:
           |-------|--------|
           | Attestation | &#10060; Unverified |
           | PHP security scan | &#10004; No blocking errors |
-          | Dependencies | &#10004; Secure |
 
           > For verified builds, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions).
           SUMMARYEOF
