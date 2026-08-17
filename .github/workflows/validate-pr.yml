@@ -10,7 +10,7 @@ on:
 # Permissions:
 # - contents: read - read repo contents
 # - issues: write - post comments on PR
-# - security-events: write - upload CodeQL results
+# - security-events: write - upload security scan results
 # - actions: read - access workflow info
 permissions:
   contents: read
@@ -813,17 +813,93 @@ jobs:
             echo "message=.phar is not verified via SLSA attestation. For verified builds, use pmmp-plugin-actions." >> "$GITHUB_OUTPUT"
           fi
 
-      # ── CodeQL Security Scan ──────────────────────────────────────────────
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: php
-          queries: security-extended
+      # ── PHP security scan of the submitted plugin ─────────────────────────
+      # CodeQL does not support PHP. Semgrep supports PHP and scans the plugin
+      # repository itself (not this registry) with security-audit rules.
+      - name: Scan submitted plugin PHP source
+        id: php-security-scan
+        if: steps.get-submission.outputs.plugin_repo != ''
+        env:
+          PLUGIN_REPO: ${{ steps.get-submission.outputs.plugin_repo }}
+        run: |
+          set -euo pipefail
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/plugin-submission"
+          PLUGIN_DIR="$(mktemp -d /tmp/plugin-source.XXXXXX)"
+          echo "Cloning source for security scan: $PLUGIN_REPO"
+          # The repository URL was validated earlier. Do not pass this
+          # workflow's token to the submitted repository.
+          git clone --depth 1 --no-recurse-submodules "https://github.com/${PLUGIN_REPO}.git" "$PLUGIN_DIR"
+
+          echo "Scanning PHP source for warnings that need human review..."
+          # Findings are printed to the Actions log, but without `--error`
+          # Semgrep exits successfully so warnings do not block the PR.
+          WARNINGS_JSON="$(mktemp /tmp/semgrep-warnings.XXXXXX.json)"
+          docker run --rm \
+            --volume "$PLUGIN_DIR:/src:ro" \
+            semgrep/semgrep \
+            semgrep scan \
+              --config p/php \
+              --config p/security-audit \
+              --severity WARNING \
+              --json \
+              --metrics=off \
+              /src > "$WARNINGS_JSON"
+
+          # Pass a compact, Markdown-safe list of warnings to the automated
+          # PR comment. Limit it to avoid exceeding GitHub output limits.
+          python3 - "$WARNINGS_JSON" << 'PYEOF'
+          import json
+          import os
+          import sys
+          import uuid
+
+          with open(sys.argv[1], encoding='utf-8') as report:
+              findings = json.load(report).get('results', [])
+
+          def compact(value, limit=240):
+              return ' '.join(str(value or '').split()).replace('|', '\\|').replace('`', "'")[:limit]
+
+          if findings:
+              shown = findings[:20]
+              lines = [
+                  ':warning: **Semgrep WARNING findings — human review required**',
+                  '',
+                  '| File | Line | Rule | Finding |',
+                  '|---|---:|---|---|',
+              ]
+              for finding in shown:
+                  extra = finding.get('extra', {})
+                  path = str(finding.get('path', '')).removeprefix('/src/')
+                  line = finding.get('start', {}).get('line', '?')
+                  lines.append(
+                      f"| `{compact(path)}` | {line} | `{compact(finding.get('check_id'))}` | {compact(extra.get('message'))} |"
+                  )
+              if len(findings) > len(shown):
+                  lines.extend(['', f"> Showing the first {len(shown)} of {len(findings)} warnings; see the workflow log for the full list."])
+              summary = '\n'.join(lines)
+          else:
+              summary = ':white_check_mark: No Semgrep WARNING findings.'
+
+          output_path = os.environ['GITHUB_OUTPUT']
+          delimiter = f"SEMGREP_WARNINGS_{uuid.uuid4().hex}"
+          with open(output_path, 'a', encoding='utf-8') as output:
+              output.write(f"warnings_summary<<{delimiter}\n{summary}\n{delimiter}\n")
+          print(summary)
+          PYEOF
+
+          echo "Scanning PHP source for blocking security errors..."
+          # Only ERROR findings fail the check. They need human review and a
+          # fix or an explicit maintainer decision before approval.
+          docker run --rm \
+            --volume "$PLUGIN_DIR:/src:ro" \
+            semgrep/semgrep \
+            semgrep scan \
+              --config p/php \
+              --config p/security-audit \
+              --severity ERROR \
+              --error \
+              --metrics=off \
+              /src
 
       # ── Dependency Review ─────────────────────────────────────────────────
       - name: Check dependency vulnerabilities
@@ -843,6 +919,7 @@ jobs:
           PLUGIN_REPO: ${{ steps.get-submission.outputs.plugin_repo }}
           ATTESTATION_TIER: ${{ steps.check-attestation.outputs.tier }}
           ATTESTATION_MSG: ${{ steps.check-attestation.outputs.message }}
+          PHP_WARNING_SUMMARY: ${{ steps.php-security-scan.outputs.warnings_summary }}
         run: |
           if [ -z "$PLUGIN_REPO" ]; then
             echo "No plugin repo, skipping comment"
@@ -892,11 +969,12 @@ jobs:
 
           ***
 
-          ### CodeQL Security Analysis
-          :white_check_mark: **Status:** Analysis complete - no high/medium severity issues found
+          ### PHP Security Analysis
+          :white_check_mark: **Status:** No blocking ERROR findings
 
-          > Note: CodeQL analysis scans the source code for security vulnerabilities.
-          > Results are available in the Security tab of this repository.
+          > Semgrep scans the submitted plugin repository's PHP source using PHP and security-audit rules. ERROR findings block approval; WARNING findings are listed below for human review.
+
+          $PHP_WARNING_SUMMARY
 
           ***
 
@@ -917,7 +995,7 @@ jobs:
           | Check | Status |
           |-------|--------|
           | Attestation | &#10004; Verified |
-          | CodeQL | &#10004; No issues |
+          | PHP security scan | &#10004; No blocking errors |
           | Dependencies | &#10004; Secure |
           SUMMARYEOF
               ;;
@@ -928,7 +1006,7 @@ jobs:
           | Check | Status |
           |-------|--------|
           | Attestation | &#10060; Unverified |
-          | CodeQL | &#10004; No issues |
+          | PHP security scan | &#10004; No blocking errors |
           | Dependencies | &#10004; Secure |
 
           > For verified builds, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions).
