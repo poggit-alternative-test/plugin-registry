@@ -756,8 +756,10 @@ jobs:
           SOURCE_DIGEST=""
           if [ -n "$TAG" ] && [ "$TAG" != "null" ]; then
             echo "Getting source digest from tag..."
-            # Try to get from release API first
-            TARGET=$(gh api repos/$PLUGIN_REPO/releases/tags/$TAG --jq '.target_commitish // empty')
+            # A release may disappear or have a tag that cannot be resolved.
+            # This digest is optional, so do not let an API 404 fail the job
+            # before the attestation can be reported as unverified.
+            TARGET=$(gh api "repos/$PLUGIN_REPO/releases/tags/$TAG" --jq '.target_commitish // empty' 2>/dev/null || true)
             if [ -n "$TARGET" ] && [ ${#TARGET} -eq 40 ]; then
               SOURCE_DIGEST="$TARGET"
               echo "Source digest (from release): ${SOURCE_DIGEST:0:16}..."
@@ -765,7 +767,7 @@ jobs:
 
             # Fallback to tag API
             if [ -z "$SOURCE_DIGEST" ]; then
-              TAG_SHA=$(gh api repos/$PLUGIN_REPO/git/refs/tags/$TAG --jq '.[0].object.sha // empty' 2>/dev/null)
+              TAG_SHA=$(gh api "repos/$PLUGIN_REPO/git/refs/tags/$TAG" --jq '.[0].object.sha // empty' 2>/dev/null || true)
               if [ -n "$TAG_SHA" ]; then
                 SOURCE_DIGEST="$TAG_SHA"
                 echo "Source digest (from tag): ${SOURCE_DIGEST:0:16}..."
@@ -777,16 +779,23 @@ jobs:
           echo "Running attestation verification..."
           echo ""
 
-          # Build verification command
-          VERIFY_CMD="gh attestation verify '$DOWNLOAD_URL' --repo '$PLUGIN_REPO' --signer-workflow '$SIGNER_WORKFLOW'"
+          # Build the command as an array so the inputs remain quoted safely.
+          # `if` suppresses bash -e for a failed verification: an invalid or
+          # absent attestation is an expected result, not a workflow failure.
+          VERIFY_ARGS=(attestation verify "$DOWNLOAD_URL" --repo "$PLUGIN_REPO" --signer-workflow "$SIGNER_WORKFLOW")
           if [ -n "$SOURCE_DIGEST" ]; then
-            VERIFY_CMD="$VERIFY_CMD --source-digest git-sha:$SOURCE_DIGEST"
+            VERIFY_ARGS+=(--source-digest "git-sha:$SOURCE_DIGEST")
           fi
 
           # Run verification
-          echo "Command: $VERIFY_CMD"
-          VERIFY_OUTPUT=$(eval $VERIFY_CMD 2>&1)
-          VERIFY_EXIT=$?
+          printf 'Command:'
+          printf ' %q' gh "${VERIFY_ARGS[@]}"
+          printf '\n'
+          if VERIFY_OUTPUT=$(gh "${VERIFY_ARGS[@]}" 2>&1); then
+            VERIFY_EXIT=0
+          else
+            VERIFY_EXIT=$?
+          fi
 
           echo "$VERIFY_OUTPUT"
           echo ""
