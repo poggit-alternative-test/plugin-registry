@@ -125,19 +125,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.get_event.outputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
           # Use GitHub API to list files changed in this PR.
           # At merge time we are on the base branch (already merged), so git diff
           # can't be used — we instead query the PR's own file list.
-          ADDED_FILES=$(python3 << 'PYEOF'
+          python3 << 'PYEOF'
           import urllib.request
           import json
+          import os
 
-          pr_number = "$PR_NUMBER"
-          gh_token = "$GH_TOKEN"
+          pr_number = os.environ.get('PR_NUMBER', '')
+          gh_token = os.environ.get('GH_TOKEN', '')
+          repo = os.environ.get('REPO', '')
+
+          if not pr_number:
+              print("No PR number provided")
+              # Write empty result
+              with open('/tmp/added_files.txt', 'w') as f:
+                  f.write('')
+              exit(0)
 
           # Get the list of files in this PR
-          url = f"https://api.github.com/repos/{'${{ github.repository }}'}/pulls/{pr_number}/files"
+          url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
           req = urllib.request.Request(url, headers={
               'Accept': 'application/vnd.github+json',
               'Authorization': f'Bearer {gh_token}',
@@ -152,13 +162,20 @@ jobs:
                       if f.get('status') == 'added' and f.get('filename', '').startswith('submissions/'):
                           if f['filename'].endswith('.yaml') or f['filename'].endswith('.yml'):
                               added.append(f['filename'])
-                  print('\n'.join(sorted(added)))
+                  # Write to file
+                  with open('/tmp/added_files.txt', 'w') as out:
+                      out.write('\n'.join(sorted(added)))
+                  print(f"Found {len(added)} submission files")
           except Exception as e:
               print(f"Error fetching PR files: {e}", file=__import__('sys').stderr)
+              # Write empty result on error
+              with open('/tmp/added_files.txt', 'w') as f:
+                  f.write('')
               exit(1)
 
           PYEOF
-          )
+
+          ADDED_FILES=$(cat /tmp/added_files.txt 2>/dev/null || echo '')
 
           if [ -z "$ADDED_FILES" ]; then
             echo "No new submission files added in this PR"
