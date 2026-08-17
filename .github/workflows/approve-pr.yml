@@ -233,6 +233,7 @@ jobs:
           import os
           import re
           import base64
+          import hashlib
           import urllib.request
           from datetime import datetime, timezone
 
@@ -486,33 +487,34 @@ jobs:
               build_tier = None
               checked_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-              # First, try SLSA attestation verification
+              # Check SLSA attestation via GitHub API
+              # We need to compute SHA256 of the .phar first
               try:
-                  import subprocess
-                  phar_url = download_url
-                  tmp_phar = '/tmp/attestation_check.phar'
+                  import hashlib
+                  phar_path = '/tmp/attestation_check.phar'
+                  urllib.request.urlretrieve(download_url, phar_path)
 
-                  # Download .phar to check attestation
-                  urllib.request.urlretrieve(phar_url, tmp_phar)
+                  # Compute SHA256 of the file
+                  sha256_hash = hashlib.sha256(open(phar_path, 'rb').read()).hexdigest()
+                  print(f"  PHAR SHA256: {sha256_hash[:16]}...")
 
-                  # Try gh attestation verify
-                  result = subprocess.run(
-                      ['gh', 'attestation', 'verify', tmp_phar,
-                       '--repo', f'{owner}/{repo}', '--format', 'json'],
-                      capture_output=True, text=True, timeout=90
-                  )
-                  if result.returncode == 0:
-                      build_tier = 'verified'
-                      print(f"  build_tier: verified (SLSA attestation)")
+                  # Check attestation via GitHub API
+                  attest_url = f"/repos/{owner}/{repo}/attestations/sha256:{sha256_hash}"
+                  try:
+                      attest_resp = gh_api(attest_url)
+                      if attest_resp and attest_resp.get('attestations'):
+                          build_tier = 'verified'
+                          print(f"  build_tier: verified (SLSA attestation found)")
+                  except Exception as attest_err:
+                      print(f"  attestation not found via API, checking uploader...")
               except Exception as e:
-                  print(f"  attestation check skipped: {e}")
+                  print(f"  attestation check failed: {e}")
 
               # If not verified, check uploader
               if build_tier is None:
                   try:
                       # Get all releases to find the uploader of the .phar asset
-                      releases = gh_api(f"/repos/{owner}/{repo}/releases")
-                      for rel in releases:
+                      for rel in all_releases:
                           for asset in rel.get('assets', []):
                               # Match by .phar filename
                               if asset['name'].lower().endswith('.phar'):
@@ -523,9 +525,12 @@ jobs:
                                   elif login:
                                       build_tier = 'unverified'
                                       print(f"  build_tier: unverified (uploaded by {login})")
+                                  else:
+                                      build_tier = 'unverified'
+                                      print(f"  build_tier: unverified (no uploader info)")
                                   break
                   except Exception as e:
-                      print(f"  build_tier check skipped: {e}")
+                      print(f"  uploader check failed: {e}")
 
               if build_tier is None:
                   build_tier = 'unverified'
