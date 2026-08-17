@@ -284,8 +284,6 @@ jobs:
               category = submission.get('category', '')
               icon_path = submission.get('icon_path')
               keywords = submission.get('keywords', [])
-              fork = submission.get('fork', False)
-              forked_from = submission.get('forked_from')
 
               # Validate
               if not repo_url:
@@ -304,6 +302,27 @@ jobs:
 
               print(f"  repo: {plugin_id}")
               print(f"  category: {category}")
+
+              # Detect fork using GitHub API
+              fork = False
+              forked_from = None
+              try:
+                  repo_info = gh_api(f"/repos/{owner}/{repo}")
+                  is_fork = repo_info.get('fork', False)
+                  if is_fork:
+                      parent = repo_info.get('parent')
+                      if parent:
+                          fork = True
+                          forked_from = parent.get('full_name')
+                          print(f"  fork: detected (forked from {forked_from})")
+                      else:
+                          source = repo_info.get('source')
+                          if source:
+                              fork = True
+                              forked_from = source.get('full_name')
+                              print(f"  fork: detected (forked from {forked_from})")
+              except Exception as e:
+                  print(f"  fork detection skipped: {e}")
 
               # Fetch plugin.yml
               try:
@@ -354,17 +373,75 @@ jobs:
               print(f"  name: {name}")
               print(f"  version: {version_raw}")
 
-              # Fetch latest release
+              # Fetch all releases to determine stable vs nightly
+              dev_build = None
+              stable_release = None
+              latest_tag = ''
+              all_releases = []
+
               try:
-                  release = gh_api(f"/repos/{owner}/{repo}/releases/latest")
-                  release_tag = release.get('tag_name', '')
+                  all_releases = gh_api(f"/repos/{owner}/{repo}/releases")
+
+                  # First pass: find latest stable release and nightly build
+                  for rel in all_releases:
+                      tag = rel.get('tag_name', '')
+                      is_prerelease = rel.get('prerelease', False)
+
+                      # Check for nightly build (tag contains "nightly")
+                      if 'nightly' in tag.lower():
+                          if dev_build is None:  # Take the first/most recent nightly
+                              for asset in rel.get('assets', []):
+                                  if asset['name'].lower().endswith('.phar'):
+                                      dev_build = {
+                                          'tag': tag,
+                                          'download_url': asset['browser_download_url']
+                                      }
+                                      print(f"  nightly: {tag}")
+                              print(f"  dev_build: enabled")
+                                      break
+
+                      # Track stable release (non-prerelease, or has "nightly" in tag but is the main release)
+                      # Priority: non-prerelease > prerelease
+                      if not is_prerelease:
+                          if stable_release is None:
+                              stable_release = rel
+                          # Or if this has a higher tag than current stable
+                          elif latest_tag and tag > latest_tag:
+                              stable_release = rel
+                      latest_tag = tag
+
+                  # If no non-prerelease found but we have releases, use the latest
+                  if stable_release is None and all_releases:
+                      # Filter out releases without .phar assets
+                      for rel in all_releases:
+                          has_phar = any(a['name'].lower().endswith('.phar') for a in rel.get('assets', []))
+                          if has_phar:
+                              stable_release = rel
+                              break
+
+                  # If no stable release, check if this IS a nightly plugin (nightly is the main thing)
+                  if stable_release is None and dev_build is not None:
+                      # This plugin only has nightly builds - use nightly as the main version
+                      stable_release = dev_build  # Will be handled below
+                      print(f"  Using nightly as main version")
+
+              except Exception as e:
+                  errors.append(f"{filepath}: Failed to fetch releases - {e}")
+                  continue
+
+              # Process stable release
+              if stable_release is None or (isinstance(stable_release, dict) and not stable_release.get('assets')):
+                  errors.append(f"{filepath}: No stable release found")
+                  continue
+
+              if isinstance(stable_release, dict):
+                  release_tag = stable_release.get('tag_name', '')
                   version = release_tag.lstrip('v') if release_tag else version_raw
                   download_url = ''
                   download_count = 0
-                  download_total = 0
                   phar_found = False
 
-                  for asset in release.get('assets', []):
+                  for asset in stable_release.get('assets', []):
                       if asset['name'].lower().endswith('.phar'):
                           download_url = asset['browser_download_url']
                           download_count = asset.get('download_count', 0)
@@ -374,32 +451,79 @@ jobs:
                           break
 
                   if not phar_found:
-                      errors.append(f"{filepath}: No .phar found in latest release")
+                      errors.append(f"{filepath}: No .phar found in stable release")
                       continue
+              else:
+                  # stable_release is actually dev_build (nightly-only plugin)
+                  release_tag = stable_release['tag']
+                  version = release_tag
+                  download_url = stable_release['download_url']
+                  download_count = 0
+                  phar_found = True
 
-                  # Calculate total downloads across all stable releases
-                  try:
-                      all_releases = gh_api(f"/repos/{owner}/{repo}/releases")
-                      for rel in all_releases:
-                          # Only count stable (non-prerelease) releases
-                          if not rel.get('prerelease', False):
-                              for asset in rel.get('assets', []):
-                                  if asset['name'].lower().endswith('.phar'):
-                                      download_total += asset.get('download_count', 0)
-                                      break  # only count .phar per release
-                      print(f"  download_total: {download_total}")
-                  except Exception as e:
-                      # If we can't fetch all releases, just use current download_count
-                      download_total = download_count
-                      print(f"  download_total: {download_total} (current release only)")
-
+              # Calculate total downloads across all stable releases
+              download_total = 0
+              try:
+                  for rel in all_releases:
+                      # Only count stable (non-prerelease) releases
+                      if not rel.get('prerelease', False) and 'nightly' not in rel.get('tag_name', '').lower():
+                          for asset in rel.get('assets', []):
+                              if asset['name'].lower().endswith('.phar'):
+                                  download_total += asset.get('download_count', 0)
+                                  break  # only count .phar per release
+                  print(f"  download_total: {download_total}")
               except Exception as e:
-                  errors.append(f"{filepath}: Failed to fetch release - {e}")
-                  continue
+                  download_total = download_count
+                  print(f"  download_total: {download_total} (current release only)")
 
-              # Check attestation
+              # Check attestation / build_tier
               build_tier = None
               checked_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+              # First, try SLSA attestation verification
+              try:
+                  import subprocess
+                  phar_url = download_url
+                  tmp_phar = '/tmp/attestation_check.phar'
+
+                  # Download .phar to check attestation
+                  urllib.request.urlretrieve(phar_url, tmp_phar)
+
+                  # Try gh attestation verify
+                  result = subprocess.run(
+                      ['gh', 'attestation', 'verify', tmp_phar,
+                       '--repo', f'{owner}/{repo}', '--format', 'json'],
+                      capture_output=True, text=True, timeout=90
+                  )
+                  if result.returncode == 0:
+                      build_tier = 'verified'
+                      print(f"  build_tier: verified (SLSA attestation)")
+              except Exception as e:
+                  print(f"  attestation check skipped: {e}")
+
+              # If not verified, check uploader
+              if build_tier is None:
+                  try:
+                      # Get all releases to find the uploader of the .phar asset
+                      releases = gh_api(f"/repos/{owner}/{repo}/releases")
+                      for rel in releases:
+                          for asset in rel.get('assets', []):
+                              # Match by .phar filename
+                              if asset['name'].lower().endswith('.phar'):
+                                  login = asset.get('uploader', {}).get('login', '')
+                                  if login == 'github-actions[bot]':
+                                      build_tier = 'built-via-ci'
+                                      print(f"  build_tier: built-via-ci (uploaded by github-actions[bot])")
+                                  elif login:
+                                      build_tier = 'unverified'
+                                      print(f"  build_tier: unverified (uploaded by {login})")
+                                  break
+                  except Exception as e:
+                      print(f"  build_tier check skipped: {e}")
+
+              if build_tier is None:
+                  build_tier = 'unverified'
+                  print(f"  build_tier: unverified (no CI detected)")
 
               # Fetch stargazers count
               try:
@@ -475,6 +599,7 @@ jobs:
                   entry['build_tier'] = build_tier
                   entry['attestation_checked_at'] = checked_at
                   entry['last_synced_at'] = now
+                  entry['dev_build'] = dev_build  # Update nightly build info if available
 
                   # Update keywords if provided
                   if keywords:
@@ -493,7 +618,7 @@ jobs:
                       'tag': release_tag,
                       'version': version,
                       'all_tags': [release_tag] if release_tag else [],
-                      'dev_build': None,
+                      'dev_build': dev_build,
                       'api': api_list,
                       'author': author_list,
                       'description': description,

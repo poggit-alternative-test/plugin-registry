@@ -339,28 +339,11 @@ jobs:
 
                   if not original_in_registry:
                       print(f"  ✓ Original not in registry - fork submission allowed")
-                      print(f"  Writing fork metadata...")
-
-                      # Add fork metadata to submission file
-                      data['fork'] = True
-                      data['forked_from'] = parent_full_name
-                      with open(filepath, 'w') as f:
-                          import yaml
-                          yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-                      print(f"  Added fork: true, forked_from: {parent_full_name}")
+                      print(f"  Fork metadata will be set during approval")
 
               elif owner == pr_author:
                   print(f"  ✓ Author owns this repository")
                   print(f"  → Permission check passed")
-
-                  # Remove any fork metadata if present
-                  if data.get('fork'):
-                      del data['fork']
-                  if data.get('forked_from'):
-                      del data['forked_from']
-                  with open(filepath, 'w') as f:
-                      import yaml
-                      yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
               else:
                   # ── Check: Is author a collaborator with push access? ─────────
