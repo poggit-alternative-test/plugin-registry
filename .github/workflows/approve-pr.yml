@@ -582,7 +582,7 @@ jobs:
         run: |
           set -e
 
-          # Read processed files
+          # Read and display processed files
           python3 << 'EOF'
           import json
           with open('/tmp/processed_files.json') as f:
@@ -592,20 +592,11 @@ jobs:
           print(f"Total: {len(files)} files")
           EOF
 
-                    # Delete files using git rm
-                    python3 -c "
-            import json
-            with open('/tmp/processed_files.json') as f:
-                files = json.load(f)
-            for f in files:
-                print(f'Deleting: {f}')
-            "
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Get files list for shell loop
+          FILES_LIST=$(python3 -c "import json; import sys; print(' '.join(json.load(open('/tmp/processed_files.json'))))")
 
           # Add deletions to staging
-          for file in $(python3 -c "import json; print(' '.join(json.load(open('/tmp/processed_files.json'))))"); do
+          for file in $FILES_LIST; do
             git rm -f "$file" 2>/dev/null || true
           done
 
