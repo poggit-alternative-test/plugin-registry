@@ -32,7 +32,11 @@ jobs:
       # ── Get workflow event data ───────────────────────────────────────────
       - name: Get workflow event data
         id: get_event
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          export GH_TOKEN="${{ github.token }}"
+
           # For workflow_dispatch, we'll prompt for PR number
           # For workflow_run and pull_request, we get it from the event
 
