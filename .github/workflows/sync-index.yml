@@ -131,7 +131,7 @@ jobs:
 
               - download_count: updated for current approved version
               - download_total: updated as cumulative sum across all stable releases
-              - download_url, build_tier: NOT updated (reflect version at approval time)
+              - tag, version, download_url, build_tier: NOT updated (reflect version at approval time)
               - all_tags, dev_build: managed by approval workflow only
               """
               plugin_id = entry.get('id', '')
@@ -232,7 +232,6 @@ jobs:
               # version that was approved; new versions require new submissions.
               did_change = (
                   entry.get('tag') != new_tag
-                  or entry.get('version') != new_version
                   or entry.get('download_count') != new_download_count
                   or entry.get('download_total') != new_download_total
                   or entry.get('icon_url') != new_icon_url
@@ -240,11 +239,11 @@ jobs:
                   or entry.get('unavailable', False) is True  # was previously unavailable
               )
 
-              entry['tag'] = new_tag
-              entry['version'] = new_version
+              # NOTE: tag and version are intentionally NOT updated
+              # They reflect the version that was approved — new versions require new submissions.
               entry['download_count'] = new_download_count
               entry['download_total'] = new_download_total
-              # download_url and build_tier are intentionally NOT updated
+              # download_url, build_tier, tag, version are intentionally NOT updated
               entry['attestation_checked_at'] = checked_at
               entry['icon_path'] = new_icon_path
               entry['icon_url'] = new_icon_url
