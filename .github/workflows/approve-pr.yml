@@ -483,14 +483,18 @@ jobs:
                   download_total = download_count
                   print(f"  download_total: {download_total} (current release only)")
 
-              # Check attestation / build_tier
+              # ── Check attestation via gh CLI ─────────────────────────────────
+              # Uses gh attestation verify with policy enforcement
               build_tier = None
               checked_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-              # Check SLSA attestation via GitHub API
-              # We need to compute SHA256 of the .phar first
+              SIGNER_WORKFLOW = 'axolotl-pm/pmmp-plugin-actions/.github/workflows/build-phar.yml'
+
               try:
                   import hashlib
+                  import subprocess
+                  import json as json_lib
+
                   phar_path = '/tmp/attestation_check.phar'
                   urllib.request.urlretrieve(download_url, phar_path)
 
@@ -498,19 +502,84 @@ jobs:
                   sha256_hash = hashlib.sha256(open(phar_path, 'rb').read()).hexdigest()
                   print(f"  PHAR SHA256: {sha256_hash[:16]}...")
 
-                  # Check attestation via GitHub API
-                  attest_url = f"/repos/{owner}/{repo}/attestations/sha256:{sha256_hash}"
-                  try:
-                      attest_resp = gh_api(attest_url)
-                      if attest_resp and attest_resp.get('attestations'):
-                          build_tier = 'verified'
-                          print(f"  build_tier: verified (SLSA attestation found)")
-                  except Exception as attest_err:
-                      print(f"  attestation not found via API, checking uploader...")
+                  # ── Get source digest from release tag ──────────────────────────
+                  # The source digest is the git commit SHA that was used to build the .phar
+                  # We can get this from the release's target_commitish or by fetching the tag
+                  source_digest = None
+
+                  if release_tag:
+                      # Method 1: Try to get from release API (target_commitish)
+                      try:
+                          releases_data = gh_api(f"/repos/{owner}/{repo}/releases/tags/{release_tag}")
+                          target = releases_data.get('target_commitish') or releases_data.get('target_commitish')
+                          if target and len(target) == 40:  # Looks like a SHA
+                              source_digest = target
+                              print(f"  source digest (from release): {source_digest[:16]}...")
+                      except Exception as e:
+                          print(f"  Could not get source digest from release API: {e}")
+
+                      # Method 2: Fallback - get from tag API
+                      if not source_digest:
+                          try:
+                              tag_data = gh_api(f"/repos/{owner}/{repo}/git/refs/tags/{release_tag}")
+                              if isinstance(tag_data, list) and tag_data:
+                                  tag_obj = tag_data[0]
+                                  if tag_obj.get('object', {}).get('sha'):
+                                      source_digest = tag_obj['object']['sha']
+                                      print(f"  source digest (from tag): {source_digest[:16]}...")
+                              elif isinstance(tag_data, dict):
+                                  # Annotated tag response
+                                  obj_sha = tag_data.get('object', {}).get('sha', '')
+                                  # Get the commit SHA from annotated tag
+                                  if obj_sha:
+                                      commit_data = gh_api(f"/repos/{owner}/{repo}/git/commits/{obj_sha}")
+                                      source_digest = obj_sha  # Use tag SHA as identifier
+                                      print(f"  source digest (annotated tag): {source_digest[:16]}...")
+                          except Exception as e:
+                              print(f"  Could not get source digest from tag API: {e}")
+
+                  # ── Verify attestation with gh CLI ───────────────────────────────
+                  # Policy enforcement:
+                  # - Predicate type: slsa.dev/provenance/v1
+                  # - Source repo: https://github.com/{owner}/{repo}
+                  # - OIDC issuer: token.actions.githubusercontent.com
+                  # - Signer workflow: axolotl-pm/pmmp-plugin-actions/.github/workflows/build-phar.yml
+                  verify_cmd = [
+                      'gh', 'attestation', 'verify',
+                      download_url,
+                      '--repo', f'{owner}/{repo}',
+                      '--signer-workflow', SIGNER_WORKFLOW,
+                  ]
+
+                  # Add source digest if available for stricter verification
+                  if source_digest:
+                      verify_cmd.extend(['--source-digest', f'git-sha:{source_digest}'])
+
+                  print(f"  Running: gh attestation verify ...")
+                  verify_result = subprocess.run(
+                      verify_cmd,
+                      capture_output=True, text=True, timeout=120,
+                      env={**os.environ, 'GH_TOKEN': gh_token}
+                  )
+
+                  print(f"  verify exit code: {verify_result.returncode}")
+
+                  if verify_result.returncode == 0:
+                      build_tier = 'verified'
+                      print(f"  build_tier: verified")
+                  else:
+                      # Verification failed - print debug info
+                      print(f"  Verification failed (non-zero exit):")
+                      for line in verify_result.stderr.split('\n')[:8]:
+                          if line.strip():
+                              print(f"    {line}")
+
+              except subprocess.TimeoutExpired:
+                  print(f"  attestation check timed out")
               except Exception as e:
                   print(f"  attestation check failed: {e}")
 
-              # If not verified, check uploader
+              # ── Fallback: Check uploader if attestation failed ──────────────
               if build_tier is None:
                   try:
                       # Get all releases to find the uploader of the .phar asset
