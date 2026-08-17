@@ -904,10 +904,11 @@ jobs:
       # ── Dependency Review ─────────────────────────────────────────────────
       - name: Check dependency vulnerabilities
         id: dependency-review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
-          # Fail on high and medium severity vulnerabilities
-          fail-on-severity: medium
+          # Fail on high and moderate severity vulnerabilities.
+          # The action uses the GitHub Advisory severity label "moderate".
+          fail-on-severity: moderate
           # Allow known CVEs with available patches
           allow-ghsas: |
             GHSA-*
