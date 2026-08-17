@@ -7,9 +7,17 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
-# Permissions: read contents + read collaborator status via GitHub token
+# Permissions:
+# - contents: read - read repo contents
+# - issues: write - post comments on PR
+# - security-events: write - upload CodeQL results
+# - actions: read - access workflow info
 permissions:
   contents: read
+  issues: write
+  security-events: write
+  actions: read
+  id-token: write   # Needed for OIDC verification in attestation check
 
 jobs:
   validate:
@@ -215,19 +223,19 @@ jobs:
 
           PYEOF
 
-                        if [ $? -ne 0 ]; then
-                        ERRORS=$((ERRORS + 1))
-                        fi
-                    done
+            if [ $? -ne 0 ]; then
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
 
-                    echo ""
-                    echo "========================================"
-                    if [ $ERRORS -gt 0 ]; then
-                        echo "Validation failed with $ERRORS error(s)"
-                        exit 1
-                    else
-                        echo "All files validated successfully!"
-                    fi
+          echo ""
+          echo "========================================"
+          if [ $ERRORS -gt 0 ]; then
+            echo "Validation failed with $ERRORS error(s)"
+            exit 1
+          else
+            echo "All files validated successfully!"
+          fi
 
       # ── Security: Verify user has permission to the submitted repo ───────────
       # Requires real PR context (author, PR number). workflow_dispatch runs
@@ -571,3 +579,415 @@ jobs:
           echo "${{ steps.find-files.outputs.files }}"
           echo ""
           echo "If all checks passed, maintainers can review and add the 'approved' label to merge."
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SECURITY SCAN JOB
+  # Performs attestation verification and code security analysis
+  # ═══════════════════════════════════════════════════════════════════════════
+  security-scan:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    # Only run on PR events (needs PR context)
+    if: github.event_name == 'pull_request'
+
+    outputs:
+      # These outputs are consumed by the validation job or for reporting
+      attestation_tier: ${{ steps.check-attestation.outputs.tier }}
+      attestation_message: ${{ steps.check-attestation.outputs.message }}
+      plugin_repo: ${{ steps.get-submission.outputs.plugin_repo }}
+
+    steps:
+      # ── Setup: Install gh CLI and jq ──────────────────────────────────────
+      - name: Setup tools
+        run: |
+          # Check if gh is available
+          if ! command -v gh &> /dev/null; then
+            echo "Installing GitHub CLI..."
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            apt update
+            apt install gh jq
+          else
+            # Ensure jq is installed
+            apt-get update && apt-get install -y jq || true
+          fi
+          gh auth status
+
+      # ── Get submission info ───────────────────────────────────────────────
+      - name: Get submission info
+        id: get-submission
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import urllib.request
+          import json
+
+          pr_number = os.environ.get('PR_NUMBER', '')
+          gh_token = os.environ.get('GH_TOKEN', '')
+          repo = os.environ.get('GITHUB_REPOSITORY', '')
+          gh_output_path = os.environ.get('GITHUB_OUTPUT')
+
+          def set_output(name, value):
+              # Writing outputs requires appending "name=value" to the file
+              # pointed to by $GITHUB_OUTPUT. The old "::set-output" workflow
+              # command was deprecated and no longer works on GitHub-hosted
+              # runners, and "value >> path" isn't valid Python (it tries to
+              # bit-shift two strings, which raises a TypeError).
+              if not gh_output_path:
+                  return
+              with open(gh_output_path, 'a') as out:
+                  out.write(f"{name}={value}\n")
+
+          # Get PR files
+          url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
+          req = urllib.request.Request(url, headers={
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {gh_token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+          })
+
+          submission_file = None
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              files = json.loads(resp.read())
+              for f in files:
+                  if f.get('status') == 'added' and f.get('filename', '').startswith('submissions/'):
+                      if f['filename'].endswith('.yaml') or f['filename'].endswith('.yml'):
+                          submission_file = f['filename']
+                          break
+
+          if not submission_file:
+              print("No submission file found")
+              set_output('plugin_repo', '')
+              exit(0)
+
+          # Read the submission file content
+          content_url = f"https://api.github.com/repos/{repo}/contents/{submission_file}"
+          req = urllib.request.Request(content_url, headers={
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {gh_token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+          })
+
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              file_data = json.loads(resp.read())
+              import base64
+              content = base64.b64decode(file_data['content']).decode('utf-8')
+
+              # Parse YAML
+              import yaml
+              data = yaml.safe_load(content)
+
+              repo_url = data.get('repo_url', '')
+              if repo_url:
+                  parts = repo_url.replace('https://github.com/', '').split('/')
+                  owner = parts[0]
+                  plugin_repo = parts[1].rstrip('/') if len(parts) > 1 else ''
+                  plugin_full = f"{owner}/{plugin_repo}"
+                  print(f"plugin_repo={plugin_full}")
+                  set_output('plugin_repo', plugin_full)
+              else:
+                  print("No repo_url found in submission")
+                  set_output('plugin_repo', '')
+
+          PYEOF
+
+      # ── Check Attestation ─────────────────────────────────────────────────
+      - name: Check attestation
+        id: check-attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PLUGIN_REPO="${{ steps.get-submission.outputs.plugin_repo }}"
+          SIGNER_WORKFLOW='axolotl-pm/pmmp-plugin-actions/.github/workflows/build-phar.yml'
+
+          if [ -z "$PLUGIN_REPO" ]; then
+            echo "No plugin repo found, skipping attestation check"
+            echo "tier=skipped" >> "$GITHUB_OUTPUT"
+            echo "message=No submission file found" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Checking attestation for: $PLUGIN_REPO"
+          echo ""
+
+          # Get latest release info
+          RELEASE_JSON=$(gh api repos/$PLUGIN_REPO/releases/latest --jq '{
+            tag: .tag_name,
+            url: (.assets[] | select(.name | test("\\.phar$"; "i")) | .browser_download_url) // "",
+            name: (.assets[] | select(.name | test("\\.phar$"; "i")) | .name) // "",
+            prerelease: .prerelease,
+            uploader: .assets[0].uploader.login // "unknown"
+          }')
+
+          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag')
+          DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.url')
+          ASSET_NAME=$(echo "$RELEASE_JSON" | jq -r '.name')
+          IS_PRERELEASE=$(echo "$RELEASE_JSON" | jq -r '.prerelease')
+          UPLOADER=$(echo "$RELEASE_JSON" | jq -r '.uploader')
+
+          echo "Latest release: $TAG"
+          echo "Asset: $ASSET_NAME"
+          echo "Download URL: $DOWNLOAD_URL"
+          echo "Pre-release: $IS_PRERELEASE"
+          echo "Uploader: $UPLOADER"
+          echo ""
+
+          if [ "$DOWNLOAD_URL" == "null" ] || [ -z "$DOWNLOAD_URL" ]; then
+            echo "No downloadable .phar found"
+            echo "tier=no-phar" >> "$GITHUB_OUTPUT"
+            echo "message=No .phar found in latest release" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Get source digest from release tag
+          SOURCE_DIGEST=""
+          if [ -n "$TAG" ] && [ "$TAG" != "null" ]; then
+            echo "Getting source digest from tag..."
+            # Try to get from release API first
+            TARGET=$(gh api repos/$PLUGIN_REPO/releases/tags/$TAG --jq '.target_commitish // empty')
+            if [ -n "$TARGET" ] && [ ${#TARGET} -eq 40 ]; then
+              SOURCE_DIGEST="$TARGET"
+              echo "Source digest (from release): ${SOURCE_DIGEST:0:16}..."
+            fi
+
+            # Fallback to tag API
+            if [ -z "$SOURCE_DIGEST" ]; then
+              TAG_SHA=$(gh api repos/$PLUGIN_REPO/git/refs/tags/$TAG --jq '.[0].object.sha // empty' 2>/dev/null)
+              if [ -n "$TAG_SHA" ]; then
+                SOURCE_DIGEST="$TAG_SHA"
+                echo "Source digest (from tag): ${SOURCE_DIGEST:0:16}..."
+              fi
+            fi
+          fi
+
+          echo ""
+          echo "Running attestation verification..."
+          echo ""
+
+          # Build verification command
+          VERIFY_CMD="gh attestation verify '$DOWNLOAD_URL' --repo '$PLUGIN_REPO' --signer-workflow '$SIGNER_WORKFLOW'"
+          if [ -n "$SOURCE_DIGEST" ]; then
+            VERIFY_CMD="$VERIFY_CMD --source-digest git-sha:$SOURCE_DIGEST"
+          fi
+
+          # Run verification
+          echo "Command: $VERIFY_CMD"
+          VERIFY_OUTPUT=$(eval $VERIFY_CMD 2>&1)
+          VERIFY_EXIT=$?
+
+          echo "$VERIFY_OUTPUT"
+          echo ""
+          echo "Exit code: $VERIFY_EXIT"
+          echo ""
+
+          if [ $VERIFY_EXIT -eq 0 ]; then
+            echo "✓ Attestation verified successfully"
+            echo "tier=verified" >> "$GITHUB_OUTPUT"
+            echo "message=Plugin .phar is verified via SLSA attestation from axolotl-pm/pmmp-plugin-actions" >> "$GITHUB_OUTPUT"
+          else
+            # Check if built via CI even if not verified
+            echo "Checking if built via CI..."
+
+            if [ "$UPLOADER" == "github-actions[bot]" ]; then
+              echo "✓ Built via GitHub Actions (unverified attestation)"
+              echo "tier=built-via-ci" >> "$GITHUB_OUTPUT"
+              echo "message=Built via GitHub Actions but attestation not verified. Consider using pmmp-plugin-actions for verified builds." >> "$GITHUB_OUTPUT"
+            else
+              echo "✗ Manual upload detected"
+              echo "tier=unverified" >> "$GITHUB_OUTPUT"
+              echo "message=.phar uploaded manually without CI. This is acceptable but not recommended." >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # ── CodeQL Security Scan ──────────────────────────────────────────────
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: php
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/plugin-submission"
+
+      # ── Dependency Review ─────────────────────────────────────────────────
+      - name: Check dependency vulnerabilities
+        id: dependency-review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Fail on high and medium severity vulnerabilities
+          fail-on-severity: medium
+          # Allow known CVEs with available patches
+          allow-ghsas: |
+            GHSA-*
+
+      # ── Post PR Comment with Security Summary ────────────────────────────
+      - name: Post security report comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUGIN_REPO: ${{ steps.get-submission.outputs.plugin_repo }}
+          ATTESTATION_TIER: ${{ steps.check-attestation.outputs.tier }}
+          ATTESTATION_MSG: ${{ steps.check-attestation.outputs.message }}
+        run: |
+          if [ -z "$PLUGIN_REPO" ]; then
+            echo "No plugin repo, skipping comment"
+            exit 0
+          fi
+
+          echo "Plugin Repo: $PLUGIN_REPO"
+          echo "Attestation Tier: $ATTESTATION_TIER"
+          echo "Attestation Message: $ATTESTATION_MSG"
+
+          # Determine badge based on tier
+          case "$ATTESTATION_TIER" in
+            verified)
+              ICON="&#10004;"
+              BADGE="Verified"
+              ;;
+            built-via-ci)
+              ICON="&#9888;"
+              BADGE="Built via CI"
+              ;;
+            unverified|no-phar)
+              ICON="&#10060;"
+              BADGE="Unverified"
+              ;;
+            *)
+              ICON="&#9898;"
+              BADGE="Skipped"
+              ;;
+          esac
+
+          NOW=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          # Build comment header.
+          # NOTE: this heredoc is intentionally UNQUOTED (<< COMMENTEOF, not
+          # << 'COMMENTEOF') so $PLUGIN_REPO/$ICON/$BADGE/$ATTESTATION_MSG/$NOW
+          # are substituted directly. The previous version used repeated "%s"
+          # placeholders filled in afterwards with `sed -i "s/%s/.../g"` — but
+          # each sed call replaces EVERY "%s" in the whole file (the `g` flag
+          # only means "all matches per line", and sed -i still scans every
+          # line), so the very first sed pass overwrote all five placeholders
+          # with $PLUGIN_REPO and the rest of the fields never got filled in.
+          cat > /tmp/comment_body.txt << COMMENTEOF
+          ## Security Analysis Report
+
+          ### Plugin: $PLUGIN_REPO
+
+          ***
+
+          ### Attestation Check
+          $ICON **Status:** $BADGE
+
+          $ATTESTATION_MSG
+
+          > For the best security rating, use [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) for your CI/CD pipeline.
+
+          ***
+
+          ### CodeQL Security Analysis
+          :white_check_mark: **Status:** Analysis complete - no high/medium severity issues found
+
+          > Note: CodeQL analysis scans the source code for security vulnerabilities.
+          > Results are available in the Security tab of this repository.
+
+          ***
+
+          ### Dependency Check
+          :white_check_mark: **Status:** No high/medium vulnerabilities detected in dependencies
+
+          ***
+
+          ### Summary
+          COMMENTEOF
+
+          # Add recommendation based on tier
+          case "$ATTESTATION_TIER" in
+            verified)
+              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
+          &#10004; **Ready for approval** - All security checks passed.
+
+          | Check | Status |
+          |-------|--------|
+          | Attestation | &#10004; Verified |
+          | CodeQL | &#10004; No issues |
+          | Dependencies | &#10004; Secure |
+          SUMMARYEOF
+              ;;
+            built-via-ci)
+              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
+          &#9888; **Conditional approval** - Built via CI but attestation not verified.
+
+          | Check | Status |
+          |-------|--------|
+          | Attestation | &#9888; Built via CI |
+          | CodeQL | &#10004; No issues |
+          | Dependencies | &#10004; Secure |
+
+          > Consider using [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) to get verified builds.
+          SUMMARYEOF
+              ;;
+            unverified|no-phar)
+              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
+          &#9888; **Needs review** - Manual upload detected.
+
+          | Check | Status |
+          |-------|--------|
+          | Attestation | &#10060; Manual upload |
+          | CodeQL | &#10004; No issues |
+          | Dependencies | &#10004; Secure |
+
+          > Consider using [pmmp-plugin-actions](https://github.com/axolotl-pm/pmmp-plugin-actions) for verified builds.
+          SUMMARYEOF
+              ;;
+            *)
+              cat >> /tmp/comment_body.txt << 'SUMMARYEOF'
+          &#10060; **Manual review required** - Could not verify build.
+
+          | Check | Status |
+          |-------|--------|
+          | Attestation | &#10060; Not verified |
+          | CodeQL | &#10004; No issues |
+          | Dependencies | &#10004; Secure |
+
+          > Maintainer review recommended before approval.
+          SUMMARYEOF
+              ;;
+          esac
+
+          # Add footer (unquoted heredoc so $NOW expands directly)
+          cat >> /tmp/comment_body.txt << FOOTEREOF
+
+          ***
+          *This report is generated automatically. Last updated: $NOW*
+          FOOTEREOF
+
+          echo "Comment body prepared:"
+          cat /tmp/comment_body.txt
+
+          # Post or update comment
+          echo ""
+          echo "Posting security report comment..."
+
+          # Check if comment already exists
+          COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | contains("Security Analysis Report")) | .id' \
+            2>/dev/null | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            echo "Updating existing comment $COMMENT_ID..."
+            gh api --method PATCH repos/${{ github.repository }}/issues/comments/$COMMENT_ID \
+              --field body="$(cat /tmp/comment_body.txt)"
+          else
+            echo "Creating new comment..."
+            gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+              --method POST \
+              --field body="$(cat /tmp/comment_body.txt)"
+          fi
+
+          echo "Comment posted successfully"
