@@ -1,7 +1,7 @@
 name: Approve Plugin Submission
 
 # Triggered when:
-# 1. PR is merged (closed with 'approved' label)
+# 1. PR is closed and merged
 # 2. auto-approve workflow completes (after merging PR)
 # Validates, generates full entry, and updates index.json.
 on:
@@ -379,7 +379,6 @@ jobs:
               author_field = get_field('author')
               authors_field = get_field('authors')
               description = get_field('description')
-              depend = get_field('depend')
 
               if not name:
                   errors.append(f"{filepath}: plugin.yml missing 'name' field")
@@ -520,9 +519,8 @@ jobs:
               SIGNER_WORKFLOW = 'axolotl-pm/pmmp-plugin-actions/.github/workflows/build-phar.yml'
 
               try:
-                  import hashlib
                   import subprocess
-                  import json as json_lib
+                  import shlex
 
                   phar_path = '/tmp/attestation_check.phar'
                   urllib.request.urlretrieve(download_url, phar_path)
@@ -540,7 +538,7 @@ jobs:
                       # Method 1: Try to get from release API (target_commitish)
                       try:
                           releases_data = gh_api(f"/repos/{owner}/{repo}/releases/tags/{release_tag}")
-                          target = releases_data.get('target_commitish') or releases_data.get('target_commitish')
+                          target = releases_data.get('target_commitish')
                           if target and len(target) == 40:  # Looks like a SHA
                               source_digest = target
                               print(f"  source digest (from release): {source_digest[:16]}...")
@@ -559,11 +557,14 @@ jobs:
                               elif isinstance(tag_data, dict):
                                   # Annotated tag response
                                   obj_sha = tag_data.get('object', {}).get('sha', '')
-                                  # Get the commit SHA from annotated tag
+                                  # For annotated tags, obj_sha is the tag object's SHA, not the commit SHA.
+                                  # Fetch the tag object to get the actual commit SHA.
                                   if obj_sha:
-                                      commit_data = gh_api(f"/repos/{owner}/{repo}/git/commits/{obj_sha}")
-                                      source_digest = obj_sha  # Use tag SHA as identifier
-                                      print(f"  source digest (annotated tag): {source_digest[:16]}...")
+                                      tag_obj = gh_api(f"/repos/{owner}/{repo}/git/tags/{obj_sha}")
+                                      commit_sha = tag_obj.get('object', {}).get('sha', '')
+                                      if commit_sha:
+                                          source_digest = commit_sha
+                                          print(f"  source digest (annotated tag, commit): {source_digest[:16]}...")
                           except Exception as e:
                               print(f"  Could not get source digest from tag API: {e}")
 
@@ -587,7 +588,6 @@ jobs:
                   if source_digest:
                       verify_cmd.extend(['--source-digest', source_digest])
 
-                  import shlex
                   print("  Running: " + " ".join(shlex.quote(arg) for arg in verify_cmd))
                   verify_result = subprocess.run(
                       verify_cmd,
@@ -693,6 +693,7 @@ jobs:
                   entry['build_tier'] = build_tier
                   entry['attestation_checked_at'] = checked_at
                   entry['last_synced_at'] = now
+                  entry['unavailable'] = False  # Reset unavailable on re-approval
                   entry['dev_build'] = dev_build  # Update nightly build info if available
 
                   # Update keywords if provided
@@ -734,6 +735,7 @@ jobs:
                       'keywords': keywords if keywords else [],
                       'fork': fork,
                       'forked_from': forked_from,
+                      'unavailable': False,
                   }
                   index.append(entry)
                   print(f"\n  ✓ Added new entry: {plugin_id}")

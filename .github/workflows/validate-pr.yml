@@ -9,7 +9,6 @@ on:
 
 # Permissions:
 # - contents: read - read repo contents
-# - security-events: write - security scan integration
 # - security-events: write - upload security scan results
 # - actions: read - access workflow info
 permissions:
@@ -29,7 +28,7 @@ jobs:
       # validation always reflects exactly what the submitter pushed, even if
       # base has moved on or the PR has a merge conflict with base.
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
@@ -668,9 +667,9 @@ jobs:
               set_output('plugin_repo', '')
               exit(0)
 
-          # Read the file as it exists at the PR head.  Omitting ``ref`` makes
-          # the Contents API read the default branch, where a newly-added
-          # submission does not exist yet and therefore returns HTTP 404.
+          # Read the file as it exists at the PR head. Adding the ``ref`` parameter
+          # ensures we read the submission file from the PR branch, not the default
+          # branch (where a newly-added submission does not exist yet and returns 404).
           content_url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(submission_file)}"
           if pr_head_sha:
               content_url += '?' + urllib.parse.urlencode({'ref': pr_head_sha})

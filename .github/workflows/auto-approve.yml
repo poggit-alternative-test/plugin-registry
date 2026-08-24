@@ -134,7 +134,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           mkdir -p "${{ runner.temp }}/approve-pr-context"
-          python3 - <<'PY'
+          python3 - <<'PYEOF'
           import json
           import os
           from pathlib import Path
@@ -148,7 +148,7 @@ jobs:
           path = Path(os.environ["RUNNER_TEMP"]) / "approve-pr-context" / "context.json"
           path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
           print(json.dumps(data, indent=2))
-          PY
+          PYEOF
 
       - name: Upload PR context
         if: always()
