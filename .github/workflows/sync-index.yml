@@ -2,14 +2,15 @@ name: Sync Plugin Index
 
 # Keeps all approved plugin entries fresh without requiring resubmission.
 #
-# - Refreshes: tag, version, download_url, download_count, build_tier,
-#   stargazers_count, attestation_checked_at, last_synced_at
-# - Re-resolves icon_url per four-tier fallback (may change if the submitter
+# - Refreshes: download_count, download_total, icon_path, icon_url,
+#   stargazers_count, unavailable, last_synced_at
+# - Re-resolves icon_url per three-tier fallback (may change if the submitter
 #   uploaded assets/ after approval): submitted icon_path → icon.png →
 #   assets/icon.png → null (frontend uses default)
 # - Marks entries unavailable if their repo or latest release becomes inaccessible
 # - Commits only when something actually changed
-# - NEVER modifies: all_tags, dev_build (managed by approval workflow only)
+# - NEVER modifies: tag, version, download_url, build_tier, attestation_checked_at,
+#   all_tags, dev_build (these reflect state at approval time)
 on:
   workflow_dispatch:
     inputs:
@@ -131,8 +132,11 @@ jobs:
 
               - download_count: updated for current approved version
               - download_total: updated as cumulative sum across all stable releases
-              - tag, version, download_url, build_tier: NOT updated (reflect version at approval time)
-              - all_tags, dev_build: managed by approval workflow only
+              - icon_path, icon_url: re-resolved per tier fallback
+              - stargazers_count: updated from GitHub API
+              - unavailable, last_synced_at: updated on every sync
+              - tag, version, download_url, build_tier, attestation_checked_at,
+                all_tags, dev_build: NOT updated (reflect approval time)
               """
               plugin_id = entry.get('id', '')
               if '/' not in plugin_id:
@@ -168,9 +172,8 @@ jobs:
                   entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                   return entry, True, 'release_has_no_phar'
 
-              new_tag = release.get('tag_name', '')
-              new_version = new_tag.lstrip('v')
-              new_download_url = phar_asset['browser_download_url']
+              # NOTE: tag, version, download_url intentionally not stored
+              # These reflect the version that was approved — new versions require new submissions.
               new_download_count = phar_asset.get('download_count', 0)
               phar_url = phar_asset['browser_download_url']
 
@@ -189,67 +192,37 @@ jobs:
                                   break  # only count .phar per release
 
               # ── Determine build_tier (stable only) ─────────────────────
-              build_tier = None
-              checked_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+              # NOTE: build_tier is intentionally NOT updated during sync.
+              # It reflects the state at approval time — re-verification requires new submission.
+              # This block is kept for reference only; no changes are persisted.
 
-              tmp_phar = '/tmp/sync_attestation.phar'
-              try:
-                  urllib.request.urlretrieve(phar_url, tmp_phar)
-                  result = subprocess.run(
-                      ['gh', 'attestation', 'verify', tmp_phar,
-                       '--repo', f'{owner}/{repo}', '--format', 'json'],
-                      capture_output=True, text=True, timeout=90
-                  )
-                  if result.returncode == 0:
-                      build_tier = 'verified'
-              except Exception:
-                  pass
-              finally:
-                  if os.path.exists(tmp_phar):
-                      os.unlink(tmp_phar)
-
-              if build_tier is None:
-                  _, releases = gh_api_json(f'/repos/{owner}/{repo}/releases')
-                  if releases:
-                      for rel in releases:
-                          for asset in rel.get('assets', []):
-                              if asset['name'] == phar_asset['name']:
-                                  login = asset.get('uploader', {}).get('login', '')
-                                  if login == 'github-actions[bot]':
-                                      build_tier = 'built-via-ci'
-                                  elif login:
-                                      build_tier = 'unverified'
-                                  break
+              # (build_tier logic omitted — not updated during sync)
 
               # ── Re-resolve icon_url ───────────────────────────────────
               new_icon_path, new_icon_url = resolve_icon_url(
                   owner, repo, entry.get('icon_path'))
 
               # ── Detect changes ─────────────────────────────────────────
-              # download_count is updated to reflect current approved version's downloads
-              # download_total is updated to reflect cumulative downloads across all stable releases
-              # download_url and build_tier are intentionally NOT updated — they reflect the
-              # version that was approved; new versions require new submissions.
+              # Tracked fields: download_count, download_total, icon_url, stargazers_count, unavailable
+              # NOT tracked (intentionally unchanged): tag, version, download_url,
+              #   build_tier, attestation_checked_at, all_tags, dev_build
               did_change = (
-                  entry.get('tag') != new_tag
-                  or entry.get('download_count') != new_download_count
+                  entry.get('download_count') != new_download_count
                   or entry.get('download_total') != new_download_total
                   or entry.get('icon_url') != new_icon_url
                   or entry.get('stargazers_count') != new_stars
                   or entry.get('unavailable', False) is True  # was previously unavailable
               )
 
-              # NOTE: tag and version are intentionally NOT updated
-              # They reflect the version that was approved — new versions require new submissions.
               entry['download_count'] = new_download_count
               entry['download_total'] = new_download_total
-              # download_url, build_tier, tag, version are intentionally NOT updated
-              entry['attestation_checked_at'] = checked_at
               entry['icon_path'] = new_icon_path
               entry['icon_url'] = new_icon_url
               entry['stargazers_count'] = new_stars
               entry['unavailable'] = False
               entry['last_synced_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+              # NOTE: tag, version, download_url, build_tier, attestation_checked_at,
+              #       all_tags, dev_build intentionally NOT modified
 
               # Ensure fields exist (for older entries)
               if 'all_tags' not in entry:
@@ -361,8 +334,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Need full checkout to have .git directory for git commands.
+      - name: Checkout registry repo
+        uses: actions/checkout@v4
+
       # Download the refreshed index from the refresh job (artifact persists
-      # between jobs; no need for a fresh checkout).
+      # between jobs). Overwrite the checked-out index.json with the updated one.
       - name: Download refreshed index
         uses: actions/download-artifact@v4
         with:
