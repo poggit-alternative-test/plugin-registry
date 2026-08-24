@@ -339,6 +339,16 @@ jobs:
           print('data/index.json updated')
           "
 
+      # ── Upload refreshed index as artifact for the commit job ─────────────
+      # Files written to the workspace are lost between jobs (different runners).
+      # Using artifact ensures the commit job receives the updated index.json.
+      - name: Upload refreshed index
+        uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-index
+          path: data/index.json
+          retention-days: 1
+
   # ── Phase 2: commit if anything changed ────────────────────────────────────
   commit:
     name: Commit updated index
@@ -351,12 +361,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout registry repo
-        uses: actions/checkout@v4
+      # Download the refreshed index from the refresh job (artifact persists
+      # between jobs; no need for a fresh checkout).
+      - name: Download refreshed index
+        uses: actions/download-artifact@v4
+        with:
+          name: refreshed-index
+          path: data/
 
-      # data/index.json was already updated by the refresh job and is
-      # present in the repo after checkout (the write happened on the same
-      # branch).
       - name: Verify index file
         run: |
           if [ ! -f data/index.json ]; then
