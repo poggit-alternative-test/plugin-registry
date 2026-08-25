@@ -106,7 +106,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
+          # Use base branch for PR events, ref_name for schedule/dispatch
+          BASE_BRANCH: ${{ github.event_name != 'pull_request' && github.ref_name || github.event.pull_request.base.ref }}
           PLUGIN_ID: ${{ steps.find-plugin.outputs.found }}
           ACTION: ${{ github.event.action }}
         run: |
@@ -121,7 +122,7 @@ jobs:
 
           gh_token = os.environ.get('GH_TOKEN', '')
           repo = os.environ.get('REPO', '')
-          branch = os.environ.get('BRANCH', 'main')
+          branch = os.environ.get('BASE_BRANCH', 'main')
           plugin_id = os.environ.get('PLUGIN_ID', '')
           action = os.environ.get('ACTION', '')
 
