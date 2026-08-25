@@ -1,5 +1,10 @@
 name: Auto Approve Plugin Submission
 
+# Prevent concurrent runs - multiple approved labels could cause issues
+concurrency:
+  group: auto-approve-${{ github.repository }}
+  cancel-in-progress: true
+
 # Triggered when 'approved' label is added to a PR.
 # Auto-merges the PR and posts a thank you comment.
 on:
@@ -169,6 +174,7 @@ jobs:
 
       # ── Merge the PR ─────────────────────────────────────────────────────
       - name: Merge pull request
+        if: steps.check-pr.outputs.merged != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -234,6 +240,7 @@ jobs:
 
       # ── Post thank you comment ───────────────────────────────────────────
       - name: Post thank you comment
+        if: steps.check-pr.outputs.merged != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

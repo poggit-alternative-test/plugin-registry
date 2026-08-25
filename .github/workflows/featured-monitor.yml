@@ -1,5 +1,10 @@
 name: Featured Plugin Monitor
 
+# Prevent concurrent workflow runs to avoid race conditions
+concurrency:
+  group: featured-monitor-${{ github.repository }}
+  cancel-in-progress: false
+
 # Monitors and manages featured plugins.
 # Submissions in this registry are PR-based (see validate-pr.yml / approve-pr.yml),
 # so featured status is tracked against the submission PR, not an issue.
@@ -29,16 +34,13 @@ jobs:
   handle-label:
     name: Handle featured label
     runs-on: ubuntu-latest
-    # Only run on pull_request events
-    if: github.event_name == 'pull_request'
+    # Only run when PR is merged (or not a pull_request event)
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     outputs:
       action: ${{ steps.process.outputs.action }}
       plugin_id: ${{ steps.process.outputs.plugin_id }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       # ── Check if it's a featured label change ─────────────────────────
       - name: Check label
         id: check-label
@@ -96,74 +98,132 @@ jobs:
           echo "This PR may not be linked to an approved plugin entry."
           exit 0
 
-      # ── Update featured status ─────────────────────────────────────────
-      - name: Update featured status
+      # ── Update featured status via GitHub API ──────────────────────────
+      # Uses SHA-based optimistic locking to prevent race conditions
+      # Also checks if plugin is unavailable before setting featured
+      - name: Update featured status via GitHub API
         id: process
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
           PLUGIN_ID: ${{ steps.find-plugin.outputs.found }}
           ACTION: ${{ github.event.action }}
         run: |
-          set -e
-
           python3 << 'PYEOF'
           import json
           import os
+          import base64
+          import urllib.request
+          import urllib.error
+          import time
           from datetime import datetime, timezone
 
-          pr_number = int(os.environ.get('PR_NUMBER', '0'))
+          gh_token = os.environ.get('GH_TOKEN', '')
+          repo = os.environ.get('REPO', '')
+          branch = os.environ.get('BRANCH', 'main')
           plugin_id = os.environ.get('PLUGIN_ID', '')
           action = os.environ.get('ACTION', '')
 
-          with open('data/index.json') as f:
-              index = json.load(f)
+          MAX_RETRIES = 3
 
-          now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          def gh_request(method, url, data=None):
+              """Make GitHub API request"""
+              headers = {
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {gh_token}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              }
+              body = None
+              if data is not None:
+                  headers['Content-Type'] = 'application/json'
+                  body = json.dumps(data).encode()
+              req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  content = resp.read()
+                  if resp.status == 204:
+                      return None
+                  return json.loads(content)
 
-          for i, entry in enumerate(index):
-              if entry.get('id') == plugin_id:
-                  if action == 'labeled':
-                      entry['featured'] = True
-                      entry['featured_marked_at'] = now
-                      print(f"✓ Set featured=true for {plugin_id}")
+          url = f"https://api.github.com/repos/{repo}/contents/data/index.json"
+
+          for attempt in range(1, MAX_RETRIES + 1):
+              print(f"Attempt {attempt}/{MAX_RETRIES}")
+
+              try:
+                  # 1. Get current file with SHA (for optimistic locking)
+                  current = gh_request('GET', f"{url}?ref={branch}")
+                  sha = current['sha']
+                  content = base64.b64decode(current['content']).decode()
+                  index = json.loads(content)
+
+                  # 2. Find and update entry
+                  now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                  found = False
+                  unavailable = False
+
+                  for entry in index:
+                      if entry.get('id') == plugin_id:
+                          # Check unavailable status
+                          unavailable = entry.get('unavailable', False)
+                          if unavailable:
+                              print(f"⚠ Plugin {plugin_id} is unavailable (unavailable=true)")
+                              print(f"   Cannot set featured while plugin is unavailable")
+                              exit(0)
+
+                          if action == 'labeled':
+                              entry['featured'] = True
+                              entry['featured_marked_at'] = now
+                              print(f"✓ Set featured=true for {plugin_id}")
+                          else:
+                              entry['featured'] = False
+                              entry['featured_marked_at'] = None
+                              print(f"✓ Set featured=false for {plugin_id}")
+                          found = True
+                          break
+
+                  if not found:
+                      print(f"Plugin {plugin_id} not found in index")
+                      exit(0)
+
+                  # 3. Write back with SHA validation (optimistic locking)
+                  new_content_b64 = base64.b64encode(
+                      (json.dumps(index, indent=2) + '\n').encode()
+                  ).decode()
+
+                  verb = "mark" if action == "labeled" else "remove"
+                  prep = "as" if action == "labeled" else "from"
+                  msg = f"feat: {verb} {plugin_id} {prep} featured"
+
+                  gh_request('PUT', url, {
+                      'message': msg,
+                      'content': new_content_b64,
+                      'sha': sha,
+                      'branch': branch
+                  })
+
+                  print("✓ Successfully updated via GitHub API")
+                  print(f"action={action}" >> open(os.environ.get('GITHUB_OUTPUT', '/dev/stdout'), 'a'))
+                  exit(0)
+
+              except urllib.error.HTTPError as e:
+                  if e.code == 409:  # Conflict - file was modified
+                      print("⚠ Conflict detected, retrying...")
+                      time.sleep(2 ** attempt)  # Exponential backoff
+                      continue
+                  elif e.code == 404:
+                      print(f"::error::index.json not found in repository")
+                      exit(1)
                   else:
-                      entry['featured'] = False
-                      entry['featured_marked_at'] = None
-                      print(f"✓ Set featured=false for {plugin_id}")
-                  break
+                      print(f"::error::HTTP Error: {e.code} - {e.reason}")
+                      exit(1)
+              except Exception as e:
+                  print(f"::error::{type(e).__name__}: {e}")
+                  exit(1)
 
-          with open('data/index.json', 'w') as f:
-              json.dump(index, f, indent=2)
-              f.write('\n')
-
-          print(f"Updated index.json")
+          print("::error::Failed to update after 3 attempts due to conflicts")
+          exit(1)
           PYEOF
-
-          echo "action=$action" >> "$GITHUB_OUTPUT"
-
-      # ── Commit changes ────────────────────────────────────────────────
-      - name: Commit changes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data/index.json
-          git diff --staged --quiet && {
-            echo "No changes to commit"
-            exit 0
-          }
-
-          if [ "${{ github.event.action }}" = "labeled" ]; then
-            git commit -m "feat: mark ${{ steps.find-plugin.outputs.found }} as featured"
-          else
-            git commit -m "feat: remove ${{ steps.find-plugin.outputs.found }} from featured"
-          fi
-
-          git push
 
   # ── Enforce max 10 featured ─────────────────────────────────────────────
   enforce-max:
@@ -173,107 +233,198 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      # ── Enforce max 10 featured via GitHub API ─────────────────────────
+      # Uses SHA-based optimistic locking to prevent race conditions
       - name: Enforce max 10 featured
         id: enforce
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           python3 << 'PYEOF'
           import json
           import os
+          import base64
+          import urllib.request
+          import urllib.error
+          import time
           from datetime import datetime, timezone
 
+          gh_token = os.environ.get('GH_TOKEN', '')
+          repo = os.environ.get('REPO', '')
+          branch = os.environ.get('BRANCH', 'main')
           MAX_FEATURED = 10
 
-          with open('data/index.json') as f:
-              index = json.load(f)
+          def gh_request(method, url, data=None):
+              """Make GitHub API request"""
+              headers = {
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {gh_token}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              }
+              body = None
+              if data is not None:
+                  headers['Content-Type'] = 'application/json'
+                  body = json.dumps(data).encode()
+              req = urllib.request.Request(url, data=body, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  content = resp.read()
+                  if resp.status == 204:
+                      return None
+                  return json.loads(content)
 
-          # Get all featured plugins sorted by featured_marked_at
-          featured = [e for e in index if e.get('featured') == True]
-          unfeatured = [e for e in index if e.get('featured') != True]
+          url = f"https://api.github.com/repos/{repo}/contents/data/index.json"
 
-          print(f"Current featured count: {len(featured)}/{MAX_FEATURED}")
-
-          if len(featured) <= MAX_FEATURED:
-              print("No action needed - under limit")
-              exit(0)
-
-          # Sort by featured_marked_at (oldest first)
-          featured.sort(key=lambda x: x.get('featured_marked_at') or '')
-
-          # Find plugins to unfeature
-          to_remove = featured[MAX_FEATURED:]
-          featured = featured[:MAX_FEATURED]
-
-          if not to_remove:
-              print("No plugins to remove from featured")
-              exit(0)
-
-          print(f"\nPlugins to remove from featured (oldest first):")
-          for p in to_remove:
-              print(f"  - {p['id']} (marked at {p.get('featured_marked_at')})")
-
-          # Update entries
-          now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          MAX_RETRIES = 3
           removed_plugins = []
 
-          for entry in index:
-              if entry in to_remove:
-                  entry['featured'] = False
-                  entry['featured_marked_at'] = None
-                  removed_plugins.append(entry['id'])
+          for attempt in range(1, MAX_RETRIES + 1):
+              print(f"Attempt {attempt}/{MAX_RETRIES}")
 
-          # Write updated index
-          with open('data/index.json', 'w') as f:
-              json.dump(index, f, indent=2)
-              f.write('\n')
+              try:
+                  # 1. Get current file with SHA (for optimistic locking)
+                  current = gh_request('GET', f"{url}?ref={branch}")
+                  sha = current['sha']
+                  content = base64.b64decode(current['content']).decode()
+                  index = json.loads(content)
 
-          print(f"\nUpdated {len(removed_plugins)} plugin(s)")
+                  # 2. Find and prepare updates
+                  featured = [e for e in index if e.get('featured') == True]
+                  print(f"Current featured count: {len(featured)}/{MAX_FEATURED}")
 
-          # Write removed plugins list for next step
-          with open('/tmp/removed.json', 'w') as f:
-              json.dump(removed_plugins, f)
+                  if len(featured) <= MAX_FEATURED:
+                      print("No action needed - under limit")
+                      exit(0)
 
-          print("\nDone")
+                  # Sort by featured_marked_at (oldest first), then approved_at, then id
+                  # This ensures deterministic ordering even if featured_marked_at is null
+                  featured.sort(key=lambda x: (
+                      x.get('featured_marked_at') or '',  # Primary: featured_marked_at
+                      x.get('approved_at') or '',          # Fallback: approved_at
+                      x.get('id', '')                      # Tie-breaker: plugin id
+                  ))
+
+                  # Find plugins to unfeature
+                  to_remove = featured[MAX_FEATURED:]
+                  if not to_remove:
+                      print("No plugins to remove from featured")
+                      exit(0)
+
+                  print(f"\nPlugins to remove from featured (oldest first):")
+                  for p in to_remove:
+                      print(f"  - {p['id']} (marked at {p.get('featured_marked_at')})")
+                      removed_plugins.append(p['id'])
+
+                  # 3. Update entries in memory
+                  now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                  for entry in index:
+                      if entry in to_remove:
+                          entry['featured'] = False
+                          entry['featured_marked_at'] = None
+
+                  # 4. Write back with SHA validation (optimistic locking)
+                  new_content_b64 = base64.b64encode(
+                      (json.dumps(index, indent=2) + '\n').encode()
+                  ).decode()
+
+                  msg = f"chore: enforce max {MAX_FEATURED} featured plugins"
+                  print(f"Removed {len(removed_plugins)} plugin(s) from featured")
+
+                  gh_request('PUT', url, {
+                      'message': msg,
+                      'content': new_content_b64,
+                      'sha': sha,
+                      'branch': branch
+                  })
+
+                  print("✓ Successfully updated via GitHub API")
+                  print(f"removed={json.dumps(removed_plugins)}" >> open(os.environ.get('GITHUB_OUTPUT', '/dev/stdout'), 'a'))
+                  exit(0)
+
+              except urllib.error.HTTPError as e:
+                  if e.code == 409:  # Conflict - file was modified
+                      print("⚠ Conflict detected, retrying...")
+                      time.sleep(2 ** attempt)  # Exponential backoff
+                      continue
+                  elif e.code == 404:
+                      print(f"::error::index.json not found in repository")
+                      exit(1)
+                  else:
+                      print(f"::error::HTTP Error: {e.code} - {e.reason}")
+                      exit(1)
+              except Exception as e:
+                  print(f"::error::{type(e).__name__}: {e}")
+                  exit(1)
+
+          print("::error::Failed to update after 3 attempts due to conflicts")
+          exit(1)
           PYEOF
-
-          # Expose the removed-plugins list as a step output so the next
-          # step can decide whether to run. /tmp/removed.json only exists
-          # when plugins were actually unfeatured (the script exits early
-          # otherwise), so default to an empty array.
-          if [ -f /tmp/removed.json ]; then
-            echo "removed=$(cat /tmp/removed.json)" >> "$GITHUB_OUTPUT"
-          else
-            echo "removed=[]" >> "$GITHUB_OUTPUT"
-          fi
 
       # ── Remove labels from PRs ──────────────────────────────────────────
       - name: Remove labels from PRs
-        if: steps.enforce.outputs.removed != '[]'
+        id: remove-labels
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          REMOVED: ${{ steps.enforce.outputs.removed }}
         run: |
           python3 << 'PYEOF'
           import json
           import os
-          import subprocess
+          import urllib.request
+          import urllib.error
+          import time
 
-          with open('/tmp/removed.json') as f:
-              removed = json.load(f)
-
+          removed = os.environ.get('REMOVED', '[]')
           repo = os.environ.get('REPO', '')
-          token = os.environ.get('GH_TOKEN', '')
+          gh_token = os.environ.get('GH_TOKEN', '')
 
+          if not removed or removed == '[]':
+              print("No plugins to unfeature")
+              exit(0)
+
+          removed = json.loads(removed)
           print(f"Removing 'featured' label from {len(removed)} PR(s)...")
 
-          # Load index to find submission PR numbers
-          with open('data/index.json') as f:
-              index = json.load(f)
+          # Get current index to find PR numbers
+          def gh_request(method, url, data=None, retries=3):
+              headers = {
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {gh_token}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              }
+              body = None
+              if data is not None:
+                  headers['Content-Type'] = 'application/json'
+                  body = json.dumps(data).encode()
+
+              for attempt in range(1, retries + 1):
+                  try:
+                      req = urllib.request.Request(url, data=body, headers=headers, method=method)
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          content = resp.read()
+                          if resp.status == 204:
+                              return None
+                          return json.loads(content)
+                  except urllib.error.HTTPError as e:
+                      if e.code == 404:
+                          return None
+                      if attempt < retries:
+                          print(f"    Retry {attempt}/{retries}...")
+                          time.sleep(2 ** attempt)  # Exponential backoff
+                          continue
+                      raise
+
+          # Get current index
+          import base64
+          url = f"https://api.github.com/repos/{repo}/contents/data/index.json"
+          current = gh_request('GET', f"{url}?ref={os.environ.get('BRANCH', 'main')}")
+          if not current:
+              print("Could not fetch index.json")
+              exit(1)
+
+          index = json.loads(base64.b64decode(current['content']).decode())
 
           for plugin_id in removed:
               for entry in index:
@@ -281,37 +432,10 @@ jobs:
                       pr_num = entry.get('submission_pr_number')
                       if pr_num:
                           print(f"  Removing label from PR #{pr_num} ({plugin_id})")
-                          # PRs are issues under the GitHub REST API, so the
-                          # issues/{number}/labels endpoint works for PR numbers too.
-                          result = subprocess.run(
-                              ['gh', 'api', f'repos/{repo}/issues/{pr_num}/labels/featured',
-                              '--method', 'DELETE',
-                              '--silent'],
-                              capture_output=True
-                          )
-                          if result.returncode == 0:
-                              print(f"    ✓ Removed")
+                          label_url = f"https://api.github.com/repos/{repo}/issues/{pr_num}/labels/featured"
+                          result = gh_request('DELETE', label_url, retries=3)
+                          if result is None:
+                              print(f"    ✓ Label removed (or already absent)")
                           else:
-                              print(f"    ✗ Failed: {result.stderr.decode()}")
+                              print(f"    ✓ Response: {result}")
           PYEOF
-
-      # ── Commit changes ────────────────────────────────────────────────
-      - name: Commit changes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data/index.json
-          git diff --staged --quiet && {
-            echo "No changes to commit"
-            exit 0
-          }
-
-          git commit -m "chore: enforce max 10 featured plugins"
-          git push
-
-          echo "Committed changes"

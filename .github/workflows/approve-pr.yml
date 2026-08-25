@@ -1,5 +1,10 @@
 name: Approve Plugin Submission
 
+# Prevent concurrent runs to avoid race conditions when processing approvals
+concurrency:
+  group: approve-pr-${{ github.repository }}
+  cancel-in-progress: false
+
 # Triggered when:
 # 1. PR is closed and merged
 # 2. auto-approve workflow completes (after merging PR)
@@ -27,11 +32,26 @@ jobs:
   approve:
     name: Approve submission
     runs-on: ubuntu-latest
+    # For workflow_run events, only proceed if the upstream "Auto Approve
+    # Plugin Submission" run actually succeeded (i.e. the 'approved' label
+    # was added and it merged the PR). That workflow also "completes" for
+    # every OTHER label (e.g. 'featured') because its job-level `if` only
+    # skips the job, not the whole run — without this guard, every label
+    # add on any PR would trigger this workflow too, and the "Download PR
+    # context" step below would fail since no artifact was ever uploaded.
+    # pull_request / workflow_dispatch events are unaffected (short-circuit
+    # on the first condition).
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
 
     steps:
       # ── Download PR context from the triggering Auto Approve run ─────────────
       - name: Download PR context
         if: github.event_name == 'workflow_run'
+        # Safety net: even with the job-level guard above, don't let a missing
+        # artifact (e.g. future changes to auto-approve.yml) hard-fail this
+        # workflow. The next step already handles a missing context file by
+        # setting triggered_by=skip.
+        continue-on-error: true
         uses: actions/download-artifact@v5
         with:
           name: approve-pr-context

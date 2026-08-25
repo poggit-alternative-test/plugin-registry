@@ -84,8 +84,17 @@ These require a human logged into GitHub — Claude cannot do these for you:
 - [x] Sanitize all externally-sourced text rendering (README/description) per §6.2.
 - [x] Workflow fixes and comment cleanup (all issues resolved).
 
-- [ ] Add featured plugin monitor workflow (`featured-monitor.yml`).
-- [ ] Add post-security-report workflow (`post-security-report.yml`).
+- [x] Add featured plugin monitor workflow (`featured-monitor.yml`).
+  - Handles `featured` label changes on merged PRs
+  - Enforces max 10 featured plugins (auto-unfeature oldest)
+  - Uses GitHub API with SHA validation (no race conditions)
+  - Retry logic with exponential backoff
+  - Skips unavailable plugins
+
+- [x] Add post-security-report workflow (`post-security-report.yml`).
+  - Posts security analysis results as PR comment
+  - Runs after validation workflow completes
+  - Updates existing comment if re-run
 
 ---
 

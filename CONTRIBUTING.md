@@ -108,6 +108,8 @@ Your plugin repository must:
 
 6. **Submission file deleted** — Your submission file is removed (you can submit again for updates)
 
+7. **Featured** (optional) — After merge, a maintainer may add the `featured` label to highlight your plugin at the top of the list
+
 ---
 
 ## Updating your plugin
@@ -138,11 +140,12 @@ You can submit the same plugin again for version updates:
 
 ## Featured Plugins
 
-Maintainers can mark plugins as "featured" by adding the `featured` label to the submission PR.
+Maintainers can mark plugins as "featured" by adding the `featured` label to the submission PR **after it has been merged**.
 
 - Featured plugins appear at the top of the list
 - Maximum **10** featured plugins at a time
 - The oldest featured plugin is automatically unfeatured when a new one is added
+- The `featured` label only takes effect after the PR is merged (not while it's still under review)
 
 ---
 

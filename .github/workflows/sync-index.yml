@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout registry repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── Load index.json ──────────────────────────────────────────────────
       - name: Load index
@@ -336,7 +336,7 @@ jobs:
     steps:
       # Need full checkout to have .git directory for git commands.
       - name: Checkout registry repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Download the refreshed index from the refresh job (artifact persists
       # between jobs). Overwrite the checked-out index.json with the updated one.

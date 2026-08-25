@@ -218,8 +218,15 @@ Workflows assign the following labels. Labels are mutually exclusive per workflo
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `featured` | Maintainer (on PR) | Plugin is featured, sorted to top |
+| `featured` | Maintainer (on merged PR) | Plugin is featured, sorted to top |
 | `approved` | Maintainer (on PR) | Approved for inclusion in the index |
+
+**Featured label behavior:**
+- The `featured` label only takes effect when applied to a **merged** PR.
+- Label changes on open PRs (not yet merged) are ignored.
+- Maximum 10 featured plugins at a time; the oldest is automatically unfeatured.
+- Unavailable plugins cannot be featured.
+- Uses GitHub API with SHA validation for atomic updates (no race conditions).
 
 Note: Submission validation labels are posted as PR comments, not as GitHub labels.
 
