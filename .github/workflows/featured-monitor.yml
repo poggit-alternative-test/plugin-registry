@@ -34,8 +34,8 @@ jobs:
   handle-label:
     name: Handle featured label
     runs-on: ubuntu-latest
-    # Only run when PR is merged (or not a pull_request event)
-    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    # Only run on pull_request events that are merged
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
     outputs:
       action: ${{ steps.process.outputs.action }}
       plugin_id: ${{ steps.process.outputs.plugin_id }}
@@ -106,8 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          # Use base branch for PR events, ref_name for schedule/dispatch
-          BASE_BRANCH: ${{ github.event_name != 'pull_request' && github.ref_name || github.event.pull_request.base.ref }}
+          BRANCH: ${{ github.ref_name }}
           PLUGIN_ID: ${{ steps.find-plugin.outputs.found }}
           ACTION: ${{ github.event.action }}
         run: |
@@ -122,7 +121,7 @@ jobs:
 
           gh_token = os.environ.get('GH_TOKEN', '')
           repo = os.environ.get('REPO', '')
-          branch = os.environ.get('BASE_BRANCH', 'main')
+          branch = os.environ.get('BRANCH', 'main')
           plugin_id = os.environ.get('PLUGIN_ID', '')
           action = os.environ.get('ACTION', '')
 
