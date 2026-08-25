@@ -91,14 +91,22 @@ Your plugin repository must:
 
 1. **Automated validation** — The workflow validates your submission:
    - Checks YAML format
+   - Verifies you have permission to the repository
    - Fetches `plugin.yml` from your repo
    - Confirms a Release with `.phar` exists
+   - Security scan (Semgrep PHP analysis)
 
-2. **Maintainer review** — A maintainer reviews and adds the `approved` label
+2. **Security report** — A report is posted as a PR comment with:
+   - Attestation check result
+   - PHP security findings (errors block approval)
 
-3. **Approval** — Your plugin is added to the index and appears on the site
+3. **Maintainer review** — A maintainer reviews and adds the `approved` label
 
-4. **Submission file deleted** — Your submission file is removed (you can submit again for updates)
+4. **Auto-merge** — The PR is automatically merged
+
+5. **Approval** — Your plugin is added to the index and appears on the site
+
+6. **Submission file deleted** — Your submission file is removed (you can submit again for updates)
 
 ---
 
@@ -130,11 +138,11 @@ You can submit the same plugin again for version updates:
 
 ## Featured Plugins
 
-Maintainers can mark plugins as "featured" by adding the `featured` label to the submission issue.
+Maintainers can mark plugins as "featured" by adding the `featured` label to the submission PR.
 
 - Featured plugins appear at the top of the list
 - Maximum **10** featured plugins at a time
-- The oldest featured plugin is automatically unfla when a new one is added
+- The oldest featured plugin is automatically unfeatured when a new one is added
 
 ---
 
@@ -147,7 +155,7 @@ To be listed in the registry, a plugin must:
 - Have a valid **`plugin.yml`** in the repository root
 - Have at least one **GitHub Release** with a **`.phar`** file
 
-There is no requirement that the `.phar` be built in any particular way. Plugins built with `pmmp-plugin-actions` + `attest: true` receive a "Verified build" badge. Plugins with a `.phar` uploaded by GitHub Actions receive a "Built via CI" badge. All other plugins are listed without a badge.
+There is no requirement that the `.phar` be built in any particular way. Plugins built with `pmmp-plugin-actions` + `attest: true` receive a "Verified build" badge. All other plugins are listed with an "Unverified" badge.
 
 ---
 
@@ -155,9 +163,10 @@ There is no requirement that the `.phar` be built in any particular way. Plugins
 
 | Badge | Requirement |
 |-------|-------------|
-| **Verified build** | Built with `pmmp-plugin-actions` + `attest: true` |
-| **Built via CI** | `.phar` uploaded by `github-actions[bot]` |
-| *(no badge)* | `.phar` uploaded manually |
+| **Verified build** | Built with `pmmp-plugin-actions` + `attest: true` (SLSA attestation verified) |
+| **Unverified** | No valid SLSA attestation |
+
+Note: `github-actions[bot]` is not treated as a trust signal because it can be impersonated by anyone. Only SLSA attestation provides cryptographic proof of build origin.
 
 ---
 

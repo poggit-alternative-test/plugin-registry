@@ -1,8 +1,10 @@
 # Project instructions for Claude Code
 
-This is the "plugin-registry" project — a GitHub-native PocketMine-MP plugin
-registry (GitHub org: poggit-alternative-test for now, migrating to axolotl-pm
-later) that replaces Poggit using only free GitHub features.
+This is the "plugin-registry" project — a fully GitHub-native PocketMine-MP plugin
+registry that replaces Poggit using only free GitHub features (Actions, Releases, Pages, API).
+
+**Key principle**: No external authentication. The frontend is a read-only data viewer.
+Submission is via fork+PR only.
 
 Before doing any work in this repo, read:
 - `ARCHITECTURE.md` — binding design decisions and constraints
@@ -11,11 +13,9 @@ Before doing any work in this repo, read:
 Rules:
 - Treat ARCHITECTURE.md §2 as constraints, not suggestions. Do not silently
   reinterpret or work around them.
-- Do not implement anything listed under ARCHITECTURE.md §8 (non-goals)
+- Do not implement anything listed under ARCHITECTURE.md §9 (non-goals)
   unless the current task explicitly asks for it.
-- If a task needs a decision not covered in ARCHITECTURE.md, stop and ask —
-  especially anything touching auth, token scope, or what gets executed vs.
-  only read.
+- If a task needs a decision not covered in ARCHITECTURE.md, stop and ask.
 - Apply least privilege to every permission, token scope, and GitHub Actions
   `permissions:` block.
 - Stick to the decided stack: React + Vite + TypeScript + Tailwind CSS,
